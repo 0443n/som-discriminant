@@ -23,9 +23,10 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from minisom import MiniSom
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.utils.validation import check_is_fitted, check_X_y, check_array
+
+from .som import bmu_distances, train_class_soms
 
 
 def sturges_bins(n_obs: int) -> int:
@@ -82,21 +83,15 @@ class KohonenDA(ClassifierMixin, BaseEstimator):
         self.n_features_in_ = X.shape[1]
         rng = np.random.default_rng(self.random_state)
 
-        self.soms_ = []
-        for c in self.classes_:
-            Xc = X[y == c]
-            som = MiniSom(
-                self.map_size,
-                self.map_size,
-                X.shape[1],
-                sigma=self.sigma,
-                learning_rate=self.learning_rate,
-                neighborhood_function=self.neighborhood_function,
-                random_seed=int(rng.integers(2**31 - 1)),
-            )
-            som.random_weights_init(Xc)  # init with random samples (as in the paper)
-            som.train_random(Xc, self.n_iterations)
-            self.soms_.append(som)
+        self.soms_ = train_class_soms(
+            X, y, self.classes_,
+            map_size=self.map_size,
+            sigma=self.sigma,
+            learning_rate=self.learning_rate,
+            neighborhood_function=self.neighborhood_function,
+            n_iterations=self.n_iterations,
+            rng=rng,
+        )
 
         if X_calib is None:
             X_calib, y_calib = X, y
@@ -121,12 +116,7 @@ class KohonenDA(ClassifierMixin, BaseEstimator):
     def bmu_distances(self, X) -> np.ndarray:
         """Matrix (n_samples, n_classes) of Euclidean distances to the BMU on each map."""
         check_is_fitted(self, "soms_")
-        X = check_array(X)
-        out = np.empty((X.shape[0], len(self.soms_)))
-        for k, som in enumerate(self.soms_):
-            W = som.get_weights().reshape(-1, X.shape[1])
-            out[:, k] = np.sqrt(((X[:, None, :] - W[None, :, :]) ** 2).sum(-1)).min(1)
-        return out
+        return bmu_distances(self.soms_, check_array(X))
 
     def histogram_scores(self, X) -> np.ndarray:
         """Unnormalised scores: frequency of the bin of d_c(x) in histogram c (0 outside)."""
