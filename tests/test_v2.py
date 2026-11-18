@@ -95,3 +95,48 @@ def test_string_labels_with_reject(iris):
     m = KohonenDA2(reject_alpha=0.05, reject_label="unknown", random_state=0).fit(X, names)
     pred = m.predict(np.vstack([X[:5], np.full((1, 4), 100.0)]))
     assert pred[-1] == "unknown" and set(pred[:5]) <= set(names)
+
+
+def test_trim_zero_is_default_behaviour(iris):
+    X, y = iris
+    a = KohonenDA2(random_state=3).fit(X, y)
+    b = KohonenDA2(random_state=3, trim=0.0).fit(X, y)
+    assert np.array_equal(a.bmu_distances(X), b.bmu_distances(X))
+
+
+def test_trim_resists_gross_outliers(iris):
+    X, y = iris
+    rng = np.random.default_rng(0)
+    Xc = X.copy()
+    idx = rng.choice(len(X), 30, replace=False)
+    Xc[idx] += rng.normal(size=(30, 4)) * 5 * X.std(0)
+    clean = np.setdiff1d(np.arange(len(X)), idx)
+    errs = {}
+    for trim in (0.0, 0.25):
+        m = KohonenDA2(random_state=0, trim=trim).fit(Xc, y)
+        # prototypes should stay close to the clean data
+        errs[trim] = m.bmu_distances(X[clean])[np.arange(len(clean)), y[clean]].mean()
+    assert errs[0.25] < errs[0.0]
+
+
+def test_trim_validation(iris):
+    with pytest.raises(ValueError):
+        KohonenDA2(trim=1.0).fit(*iris)
+
+
+def test_novelty_pvalue_monotone_in_min_distance(model, iris):
+    X, _ = iris
+    rng = np.random.default_rng(0)
+    Z = np.vstack([X, X + rng.normal(scale=2.0, size=X.shape)])
+    s = model.bmu_distances(Z).min(1)
+    p = model.novelty_pvalues(Z)
+    o = np.argsort(s)
+    assert (np.diff(p[o]) <= 1e-12).all() and (p > 0).all()
+
+
+@pytest.mark.parametrize("mode", ["pooled", "classwise"])
+def test_reject_modes(iris, mode):
+    X, y = iris
+    known = y != 0
+    m = KohonenDA2(reject_alpha=0.05, reject_mode=mode, random_state=0).fit(X[known], y[known])
+    assert (m.predict(X[~known]) == -1).mean() > 0.9

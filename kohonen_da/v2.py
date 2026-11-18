@@ -17,8 +17,10 @@ Fixes for the weaknesses of the 2023 method found in the reproduction
   out-of-fold: for each of `cv` folds, per-class SOMs are trained on the remaining
   folds and the held-out objects are mapped. The final maps are refit on all data.
 
-* No way to say "none of the above" -> reject option.  If max_c p_c(x) < alpha the
-  object is not typical for any class.
+* No way to say "none of the above" -> reject option. Default ("pooled"): a conformal
+  p-value of the distance to the nearest prototype over all maps; reject if < alpha.
+  Alternative ("classwise"): reject if max_c p_c(x) < alpha (empty prediction set).
+  The pooled score separates unseen classes better (see README, open-set benchmark).
 
 Two scorings are available for `predict_proba` / `predict` (both are fitted, so
 `scoring` can be switched after fitting):
@@ -28,7 +30,7 @@ Two scorings are available for `predict_proba` / `predict` (both are fitted, so
   "joint" : multinomial logistic regression on the vector of log BMU distances to *all*
             maps, fitted on out-of-fold distances -> P(c | d_1, ..., d_K).
 
-The reject option and prediction sets always use the conformal p-values.
+Prediction sets use the class-wise p-values; the reject option uses `reject_mode`.
 """
 
 from __future__ import annotations
@@ -58,11 +60,19 @@ class KohonenDA2(ClassifierMixin, BaseEstimator):
     cv : int
         Number of folds for cross-fitted calibration distances.
     reject_alpha : float or None
-        If set, `predict` returns `reject_label` for objects with max p-value < alpha.
+        If set, `predict` returns `reject_label` for objects judged novel at level alpha.
+    reject_mode : {"pooled", "classwise"}
+        "pooled": reject if the novelty p-value (min distance over all maps, calibrated
+        on pooled out-of-fold distances) is < alpha. Ranks unseen objects better.
+        "classwise": reject if max_c p_c(x) < alpha (empty prediction set).
     reject_label : object
         Label used for rejected objects.
     C : float
         Inverse regularisation strength of the logistic regression ("joint").
+    trim : float in [0, 1)
+        Share of each class's training objects with the largest BMU distance that is
+        dropped before a second SOM fit (outlier-resistant prototypes). Calibration
+        still uses all out-of-fold distances, so coverage refers to the data as given.
     random_state : int or None
     """
 
@@ -77,7 +87,9 @@ class KohonenDA2(ClassifierMixin, BaseEstimator):
         cv: int = 5,
         reject_alpha: float | None = None,
         reject_label=-1,
+        reject_mode: str = "pooled",
         C: float = 1.0,
+        trim: float = 0.0,
         random_state: int | None = None,
     ):
         self.map_size = map_size
@@ -89,7 +101,9 @@ class KohonenDA2(ClassifierMixin, BaseEstimator):
         self.cv = cv
         self.reject_alpha = reject_alpha
         self.reject_label = reject_label
+        self.reject_mode = reject_mode
         self.C = C
+        self.trim = trim
         self.random_state = random_state
 
     def _som_kwargs(self, rng):
@@ -100,6 +114,7 @@ class KohonenDA2(ClassifierMixin, BaseEstimator):
             neighborhood_function=self.neighborhood_function,
             n_iterations=self.n_iterations,
             rng=rng,
+            trim=self.trim,
         )
 
     # ------------------------------------------------------------------ fitting
@@ -128,6 +143,8 @@ class KohonenDA2(ClassifierMixin, BaseEstimator):
         # conformal calibration: own-class out-of-fold distances, sorted
         self.calib_dists_ = [np.sort(D_oof[y_idx == k, k]) for k in range(len(self.classes_))]
         self.calib_median_ = np.array([np.median(c) for c in self.calib_dists_])
+        # pooled novelty calibration: min distance over all maps, out-of-fold
+        self.novelty_calib_ = np.sort(D_oof.min(1))
 
         # joint model on log distances to all maps
         self.joint_ = LogisticRegression(C=self.C, max_iter=5000).fit(
@@ -151,6 +168,18 @@ class KohonenDA2(ClassifierMixin, BaseEstimator):
     def pvalues(self, X) -> np.ndarray:
         """Conformal p-values (n_samples, n_classes): typicality of x for each class."""
         return self._pvalues_from_d(self.bmu_distances(X))
+
+    def novelty_pvalues(self, X) -> np.ndarray:
+        """Conformal p-value that x comes from *any* known class (n_samples,).
+
+        Score: min_c d_c(x), the distance to the nearest prototype over all maps;
+        calibrated on pooled out-of-fold scores. For objects of the known classes
+        P(p < alpha) <= alpha (marginally over classes).
+        """
+        s = self.bmu_distances(X).min(1)
+        cal = self.novelty_calib_
+        n_ge = len(cal) - np.searchsorted(cal, s, side="left")
+        return (1 + n_ge) / (len(cal) + 1)
 
     def predict_set(self, X, alpha: float = 0.05) -> np.ndarray:
         """Boolean (n_samples, n_classes): classes not rejected at level alpha.
@@ -185,7 +214,12 @@ class KohonenDA2(ClassifierMixin, BaseEstimator):
             raise ValueError(f"unknown scoring={self.scoring!r}")
         pred = self.classes_[idx]
         if self.reject_alpha is not None:
-            rejected = P.max(1) < self.reject_alpha
+            if self.reject_mode == "pooled":
+                rejected = self.novelty_pvalues(X) < self.reject_alpha
+            elif self.reject_mode == "classwise":
+                rejected = P.max(1) < self.reject_alpha
+            else:
+                raise ValueError(f"unknown reject_mode={self.reject_mode!r}")
             if rejected.any():
                 try:
                     pred = pred.astype(np.result_type(pred, np.asarray(self.reject_label)))

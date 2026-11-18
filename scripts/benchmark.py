@@ -10,7 +10,7 @@ contamination  : a fraction eps of *training* objects get gross errors
                  measures the classifiers, not the breakdown of the scaler.
 
 All hyper-parameters are fixed defaults (no tuning for any method); SOMs are 3x3 per
-class as in the paper.
+class as in the paper. v2_joint_tNN = v2 joint with trim=0.NN (outlier-resistant maps).
 
 Usage:
   python scripts/benchmark.py clean [--runs 50]
@@ -50,7 +50,7 @@ from kohonen_da.baselines import GMMClassifier
 from kohonen_da.datasets import ALL, REAL, SYNTHETIC
 
 OUT = Path(__file__).resolve().parent.parent / "results" / "benchmark"
-SOM_METHODS = ["v1", "nearest_map", "v2_pvalue", "v2_joint"]
+SOM_METHODS = ["v1", "nearest_map", "v2_pvalue", "v2_joint", "v2_joint_t10", "v2_joint_t20"]
 BASELINES = ["lda", "qda", "gnb", "gmm3", "knn5", "svm_rbf", "rf"]
 METHODS = SOM_METHODS + BASELINES
 CONTAM_DATASETS = ["iris", "wine", "breast_cancer", "multimodal", "rings"]
@@ -104,6 +104,11 @@ def run_split(dataset, seed, eps=0.0, scaler="standard"):
     add("v2_pvalue", v2.predict(Xte), t)
     v2.set_params(scoring="joint")
     add("v2_joint", v2.predict(Xte), t)
+
+    for trim, name in [(0.1, "v2_joint_t10"), (0.2, "v2_joint_t20")]:
+        t0 = time.perf_counter()
+        vt = KohonenDA2(scoring="joint", trim=trim, random_state=seed).fit(Xtr, ytr)
+        add(name, vt.predict(Xte), time.perf_counter() - t0)
 
     for name in BASELINES:
         t0 = time.perf_counter()

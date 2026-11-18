@@ -70,7 +70,8 @@ These are the targets for the improved method, implemented below as v2.
 | Bin lookup: zero outside the histogram range, bin mass ≠ density, not comparable across classes | **Class-conditional conformal p-value** of the BMU distance: `p_c(x) = (1 + #{calib d ≥ d_c(x)}) / (n_c + 1)`. Never 0, monotone, no bins, and uniform under class *c*, so comparable across classes |
 | Histograms fitted on the evaluation set | **Cross-fitted calibration**: out-of-fold BMU distances (5 folds); final maps refit on all data |
 | Compares p(d₁\|1), p(d₂\|2), … (different variables) | Optional **`scoring="joint"`**: logistic regression on log distances to *all* maps → P(c \| d₁…d_K) |
-| No "none of the above" | **Reject option** (`reject_alpha`) and **prediction sets**: P(true class excluded) ≤ α |
+| No "none of the above" | **Reject option** (`reject_alpha`) and **prediction sets**: P(true class excluded) ≤ α. `reject_mode="pooled"` (default) uses a conformal p-value of the distance to the nearest prototype over all maps; `"classwise"` rejects when every class p-value is < α |
+| Prototypes pulled by gross outliers (added after the benchmark) | **`trim`**: fit, drop the `trim` share of each class with the largest BMU distance, re-initialise and refit |
 
 Run: `.venv/bin/python scripts/evaluate_v2.py [--dataset iris|wine|breast_cancer] [--scale]`
 
@@ -97,7 +98,7 @@ Run: `.venv/bin/python scripts/evaluate_v2.py [--dataset iris|wine|breast_cancer
 
 ### Open set: train on 2 classes, then show held-out known objects plus all objects of the unseen class
 
-Each cell shows the false-reject rate on known classes / the detection rate on the unseen class.
+Each cell shows the false-reject rate on known classes / the detection rate on the unseen class. This early experiment uses `reject_mode="classwise"`; the full open-set benchmark below shows that `"pooled"` is better.
 
 | Unseen class | v2 α=0.05 | v2 α=0.20 | v1 (all-zero = reject) | v2 AUROC |
 |---|---|---|---|---|
@@ -115,46 +116,50 @@ Each cell shows the false-reject rate on known classes / the detection rate on t
 - `pvalue` scoring ≈ nearest map for accuracy; its value lies in calibrated typicality, the reject option and prediction sets.
 - Coverage holds, slightly conservatively. The likely cause is that the final maps are trained on more data than the fold maps.
 - Open set: v2 lets you *choose* the false-reject rate (v1's is an accident of histogram ranges). At comparable false-reject rates it detects unseen classes as well or better.
-- On these near-Gaussian datasets LDA/QDA are still best. The method's niche has to be shown on non-Gaussian, multimodal or outlier-contaminated data (next step).
+- On these near-Gaussian datasets LDA/QDA are still best. See the benchmark below for non-Gaussian and contaminated data.
 
-## Benchmark (`scripts/benchmark.py`)
+## Benchmark (`scripts/benchmark.py`, `scripts/openset.py`)
 
 Setup:
 - **Datasets:** 4 real (iris, wine, breast cancer, digits) and 5 synthetic non-Gaussian (`kohonen_da/datasets.py`). The synthetic sets are multimodal (3 blobs per class), rings, moons, XOR and heavy-tailed (Student-t, df=1.5). Each synthetic set has 2 informative dimensions plus 2 pure-noise dimensions.
 - **Splits:** 50 repeated stratified 68/32 splits, with features standardised on the training part.
 - **Hyper-parameters:** library defaults for every method, with no tuning anywhere. SOMs are 3×3 per class, as in the paper.
 - **`gmm3`:** a per-class 3-component Gaussian mixture with the Bayes rule (`kohonen_da/baselines.py`). It is the parametric counterpart of "one SOM per class".
+- **`v2 joint tNN`:** v2 joint with `trim=0.NN`.
 
 ```bash
-.venv/bin/python scripts/benchmark.py clean           # ~2 min on 16 cores
-.venv/bin/python scripts/benchmark.py contamination   # ~3 min
+.venv/bin/python scripts/benchmark.py clean           # ~7 min on 16 cores
+.venv/bin/python scripts/benchmark.py contamination   # ~8 min
+.venv/bin/python scripts/openset.py                   # ~3 min
 .venv/bin/python scripts/plot_benchmark.py
+.venv/bin/python scripts/benchmark.py report          # re-print tables from saved CSVs
+.venv/bin/python scripts/openset.py --report
 ```
 
 ### Clean data: mean accuracy
 
-| dataset | v1 | nearest map | v2 pvalue | v2 joint | LDA | QDA | GNB | GMM3 | kNN5 | SVM-RBF | RF |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| iris | .934 | .944 | .947 | .952 | **.978** | **.978** | .952 | .959 | .948 | .957 | .948 |
-| wine | .895 | .947 | .928 | .969 | .981 | **.992** | .973 | .837 | .956 | .983 | .983 |
-| breast cancer | .861 | .952 | .874 | .953 | .957 | .962 | .933 | .953 | .965 | **.973** | .957 |
-| digits | .751 | .951 | .904 | .950 | .951 | .967 | .789 | .850 | .971 | **.979** | .974 |
-| multimodal | .794 | .855 | .838 | .854 | .627 | .896 | .725 | .958 | .919 | .934 | **.976** |
-| rings | .512 | .609 | .557 | .756 | .354 | .751 | .804 | .769 | .673 | .910 | **.939** |
-| moons | .803 | .843 | .843 | .843 | .857 | .852 | .855 | .881 | .880 | .865 | **.907** |
-| xor | .875 | .909 | .901 | .904 | .506 | **.959** | .508 | .945 | .935 | .935 | .931 |
-| heavy-tailed | .441 | .650 | .637 | .660 | .707 | .522 | .466 | .670 | .724 | **.738** | **.738** |
+| dataset | v1 | nearest map | v2 pvalue | v2 joint | v2 joint t10 | v2 joint t20 | LDA | QDA | GNB | GMM3 | kNN5 | SVM-RBF | RF |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| iris | .934 | .944 | .947 | .952 | .952 | .949 | **.978** | **.978** | .952 | .959 | .948 | .957 | .948 |
+| wine | .895 | .947 | .928 | .969 | .970 | .972 | .981 | **.992** | .973 | .837 | .956 | .983 | .983 |
+| breast cancer | .861 | .952 | .874 | .953 | .950 | .949 | .957 | .962 | .933 | .953 | .965 | **.973** | .957 |
+| digits | .751 | .951 | .904 | .950 | .953 | .950 | .951 | .967 | .789 | .850 | .971 | **.979** | .974 |
+| multimodal | .794 | .855 | .838 | .854 | .847 | .850 | .627 | .896 | .725 | .958 | .919 | .934 | **.976** |
+| rings | .512 | .609 | .557 | .756 | .750 | .729 | .354 | .751 | .804 | .769 | .673 | .910 | **.939** |
+| moons | .803 | .843 | .843 | .843 | .848 | .844 | .857 | .852 | .855 | .881 | .880 | .865 | **.907** |
+| xor | .875 | .909 | .901 | .904 | .909 | .907 | .506 | **.959** | .508 | .945 | .935 | .935 | .931 |
+| heavy-tailed | .441 | .650 | .637 | .660 | .678 | .685 | .707 | .522 | .466 | .670 | .724 | **.738** | **.738** |
 
-Average rank over all 9 datasets, where 1 is best: SVM 2.56, RF 2.72, QDA 4.17, kNN 4.50, GMM3 5.00, **v2 joint 6.39**, LDA 6.39, nearest map 7.56, GNB 7.61, v2 pvalue 8.78, **v1 10.33**. The Friedman test gives χ²=50.0, p=2.6e-7.
+Average rank over all 9 datasets, where 1 is best: SVM 2.56, RF 2.94, QDA 4.39, kNN 5.17, GMM3 5.67, **v2 joint t10 7.00**, LDA 7.17, v2 joint 7.50, v2 joint t20 7.89, nearest map 8.78, GNB 8.83, v2 pvalue 10.78, **v1 12.33**. The Friedman test gives χ²=58.5, p=4.2e-8.
 
 v2 joint against each method, using a paired Wilcoxon test over splits within each dataset (p<0.05). Each cell counts datasets:
 
-| | v1 | nearest map | v2 pvalue | LDA | QDA | GNB | GMM3 | kNN5 | SVM | RF |
-|---|---|---|---|---|---|---|---|---|---|---|
-| v2 joint significantly better | 9 | 3 | 6 | 3 | 1 | 5 | 2 | 2 | 0 | 0 |
-| v2 joint significantly worse | 0 | 0 | 0 | 4 | 6 | 1 | 3 | 6 | 8 | 7 |
+| | v1 | nearest map | v2 pvalue | t10 | t20 | LDA | QDA | GNB | GMM3 | kNN5 | SVM | RF |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| v2 joint significantly better | 9 | 3 | 6 | 0 | 1 | 3 | 1 | 5 | 2 | 2 | 0 | 0 |
+| v2 joint significantly worse | 0 | 0 | 0 | 2 | 1 | 4 | 6 | 1 | 3 | 6 | 8 | 7 |
 
-Mean fit time per split: v2 2.6 s (5-fold cross-fit, i.e. 6× SOM training), v1 0.45 s, RF 1.2 s, the rest < 0.11 s.
+Mean fit time per split: v2 2.5 s (5-fold cross-fit, i.e. 6× SOM training), v2 trimmed 4.7–4.9 s, v1 0.44 s, RF 1.1 s, the rest < 0.1 s.
 
 ### Training-set contamination (gross errors, clean test set)
 
@@ -164,14 +169,47 @@ A fraction ε of the training objects get `x += N(0, (5·std)²)` with labels ke
 
 Mean accuracy change vs. clean data, averaged over iris, wine, breast cancer, multimodal and rings:
 
-| ε | v1 | nearest map | v2 pvalue | v2 joint | LDA | QDA | GNB | GMM3 | kNN5 | SVM-RBF | RF |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| 0.05 | −.027 | −.012 | −.017 | −.016 | −.025 | −.147 | −.113 | −.039 | −.001 | −.041 | −.001 |
-| 0.10 | −.062 | −.031 | −.039 | −.034 | −.044 | −.201 | −.181 | −.098 | −.003 | −.082 | −.002 |
-| 0.20 | −.092 | −.049 | −.054 | −.057 | −.062 | −.294 | −.281 | −.176 | −.008 | −.138 | −.004 |
-| 0.30 | −.103 | −.074 | −.086 | −.098 | −.070 | −.309 | −.306 | −.222 | −.011 | −.164 | −.008 |
+| ε | v1 | nearest map | v2 pvalue | v2 joint | v2 joint t10 | v2 joint t20 | LDA | QDA | GNB | GMM3 | kNN5 | SVM-RBF | RF |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0.05 | −.027 | −.012 | −.017 | −.016 | −.006 | −.006 | −.025 | −.147 | −.113 | −.039 | −.001 | −.041 | −.001 |
+| 0.10 | −.062 | −.031 | −.039 | −.034 | −.010 | −.010 | −.044 | −.201 | −.181 | −.098 | −.003 | −.082 | −.002 |
+| 0.20 | −.092 | −.049 | −.054 | −.057 | −.028 | −.012 | −.062 | −.294 | −.281 | −.176 | −.008 | −.138 | −.004 |
+| 0.30 | −.103 | −.074 | −.086 | −.098 | −.059 | **−.035** | −.070 | −.309 | −.306 | −.222 | −.011 | −.164 | −.008 |
 
-Full per-dataset tables: `python scripts/benchmark.py report`.
+### Open-set recognition (`scripts/openset.py`)
+
+- **Protocol:** use every dataset with ≥ 3 classes. Each class in turn is "unseen". Train on the rest (68/32 split of the known objects), then score the held-out known objects and all unseen ones. There are 20 splits per held-out class.
+- **"Unknown" scores:**
+  - v2 class-wise (−max_c p_c) and v2 pooled (−novelty p-value of min_c d_c);
+  - the raw nearest-map distance;
+  - the mean distance to the 5 nearest training objects;
+  - the per-class GMM log-likelihood;
+  - the Mahalanobis distance to the nearest class mean (shared covariance);
+  - −max posterior probability of LDA, SVM and RF.
+
+AUROC (unseen vs. known):
+
+| dataset | v2 class-wise | **v2 pooled** | nearest map | kNN dist | GMM loglik | Mahalanobis | LDA maxprob | SVM maxprob | RF maxprob |
+|---|---|---|---|---|---|---|---|---|---|
+| iris | .934 | .956 | .960 | .952 | .958 | **.985** | .393 | .947 | .563 |
+| wine | .947 | .965 | .967 | .968 | .866 | **.977** | .684 | .868 | .854 |
+| digits | .899 | .909 | .909 | .927 | .873 | .870 | .849 | .960 | **.965** |
+| multimodal | .834 | .838 | .837 | .885 | **.954** | .719 | .281 | .683 | .797 |
+| rings | .604 | .626 | .626 | .711 | **.725** | .545 | .487 | .367 | .521 |
+| heavy-tailed | .636 | .639 | .639 | .678 | .670 | .668 | .587 | .690 | **.712** |
+
+Average AUROC rank: kNN dist 2.83, nearest map 3.83, GMM 3.83, **v2 pooled 4.33**, Mahalanobis 4.67, RF 5.17, SVM 5.50, v2 class-wise 6.00, LDA 8.83. v2 pooled is significantly better (paired Wilcoxon, p<0.05) than v2 class-wise on 5/6 datasets and than LDA on 6/6. kNN distance is significantly better than it on 5/6.
+
+The SVM/RF/kNN/GMM baselines have no built-in way to pick a threshold. v2 does: α=0.05 is fixed in advance, with no oracle. Cells show false-reject rate / detection rate:
+
+| dataset | v2 class-wise | v2 pooled |
+|---|---|---|
+| iris | .020 / .573 | .034 / .681 |
+| wine | .030 / .520 | .035 / .722 |
+| digits | .024 / .134 | .047 / .383 |
+| multimodal | .034 / .148 | .044 / .199 |
+| rings | .023 / .051 | .048 / .131 |
+| heavy-tailed | .022 / .027 | .039 / .044 |
 
 ### Ablation: map size and neighbourhood width (v2, 20 splits)
 
@@ -180,9 +218,17 @@ My hypothesis was that neighbourhood smoothing (σ) pulls prototypes between mod
 ### What the benchmark says, honestly
 
 1. **v2 fixes v1.** It is significantly better on 9/9 datasets, and its outputs are always defined. On digits v1 collapses to .75, because in 64-D most test points fall outside every histogram.
-2. **Accuracy is not the method's selling point.** v2 joint is mid-pack, tied with LDA on average rank. SVM and RF beat it on almost every dataset, and kNN/QDA on most. On near-Gaussian real data LDA/QDA win. On nonlinear data v2 beats LDA by a wide margin (multimodal, rings, XOR), but flexible methods beat v2.
-3. **The 2023 "robust to outliers" claim is half true.** The SOM methods degrade about as much as LDA. They are far more robust than density-based QDA/GNB/GMM and than SVM, but far *less* robust than kNN and RF, which barely move.
-4. **Where the method genuinely adds value** is calibrated per-class typicality: the conformal coverage guarantee, prediction sets, and the reject option for unseen classes (see v2 section). Those are things SVM/RF/kNN don't offer out of the box. A follow-up paper should be framed around this, not around accuracy.
+2. **Accuracy is not the method's selling point.** v2 joint is mid-pack, about level with LDA on average rank. SVM and RF beat it on almost every dataset, and kNN/QDA on most. On nonlinear data it beats LDA by a wide margin, but flexible methods beat it.
+3. **Robustness: v1 is middling, trimmed v2 is good.**
+   - Untrimmed SOM methods degrade about as much as LDA.
+   - With `trim=0.2`, v2 loses only 3.5 points at ε=0.3 (untrimmed: 9.8). That makes it the 3rd most robust method, behind RF and kNN, which barely move, and ahead of LDA, SVM and all density-based methods.
+   - On clean data trimming costs nothing measurable.
+4. **Open set: the guarantee is v2's real asset, its ranking is middling.**
+   - The pooled score holds the false-reject rate at ≤ α out of the box (3.4–4.8% at α=5%).
+   - Its ranking quality is mid-pack. The kNN distance beats it, and so does GMM on multimodal data and SVM/RF on digits.
+   - The per-class p-value is a *worse* novelty score than the pooled distance. Normalising per class inflates the p-values for classes with a broad spread.
+5. **Implication for a paper.** The defensible contribution is a careful, fully calibrated version of the 2023 idea: per-class prototype maps, cross-fitted conformal p-values, prediction sets, pooled novelty detection with a guaranteed false-reject rate, and trimmed training for robustness. It should be presented with an honest comparison, not as a more accurate classifier.
+   - Caveat: the conformal wrapper is generic. Any score, including the kNN distance, could be calibrated the same way. Novelty therefore has to come from the combination plus the interpretability of a small set of per-class prototypes, not from the guarantee alone.
 
 ## Layout
 
@@ -193,6 +239,7 @@ kohonen_da/som.py            shared SOM training / BMU distances
 scripts/reproduce_paper.py   Section 4 reproduction + repeated-split study
 scripts/evaluate_v2.py       v2 vs v1 vs baselines: accuracy, coverage, open set
 scripts/benchmark.py         9-dataset benchmark + contamination experiment
+scripts/openset.py           open-set recognition benchmark
 scripts/plot_benchmark.py    contamination figure
 kohonen_da/datasets.py       real + synthetic benchmark datasets
 kohonen_da/baselines.py      per-class GMM classifier

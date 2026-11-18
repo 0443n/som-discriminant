@@ -91,7 +91,8 @@ def open_set(X, y, runs, scale, map_size, alpha=0.05):
                 sc = StandardScaler().fit(Xtr)
                 Xtr, Xte, Xu_ = sc.transform(Xtr), sc.transform(Xte), sc.transform(Xu)
 
-            v2 = KohonenDA2(map_size=map_size, reject_alpha=alpha, random_state=seed).fit(Xtr, ytr)
+            v2 = KohonenDA2(map_size=map_size, reject_alpha=alpha, reject_mode="classwise",
+                            random_state=seed).fit(Xtr, ytr)
             pk, pu = v2.predict(Xte), v2.predict(Xu_)
             acc_k = (pk[pk != -1] == yte[pk != -1]).mean() if (pk != -1).any() else np.nan
 
