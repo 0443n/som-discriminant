@@ -11,6 +11,7 @@ contamination  : a fraction eps of *training* objects get gross errors
 
 All hyper-parameters are fixed defaults (no tuning for any method); SOMs are 3x3 per
 class as in the paper. v2_joint_tNN = v2 joint with trim=0.NN (outlier-resistant maps).
+v3_* = KohonenDA3 (neuron-level diag mixtures), see kohonen_da/v3.py.
 
 Usage:
   python scripts/benchmark.py clean [--runs 50]
@@ -45,12 +46,13 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import RobustScaler, StandardScaler
 from sklearn.svm import SVC
 
-from kohonen_da import KohonenDA, KohonenDA2
+from kohonen_da import KohonenDA, KohonenDA2, KohonenDA3
 from kohonen_da.baselines import GMMClassifier
 from kohonen_da.datasets import ALL, REAL, SYNTHETIC
 
 OUT = Path(__file__).resolve().parent.parent / "results" / "benchmark"
-SOM_METHODS = ["v1", "nearest_map", "v2_pvalue", "v2_joint", "v2_joint_t10", "v2_joint_t20"]
+SOM_METHODS = ["v1", "nearest_map", "v2_pvalue", "v2_joint", "v2_joint_t10", "v2_joint_t20",
+               "v3_density", "v3_joint_density", "v3_joint_sorted", "v3_density_t10", "v3_density_t20"]
 BASELINES = ["lda", "qda", "gnb", "gmm3", "knn5", "svm_rbf", "rf"]
 METHODS = SOM_METHODS + BASELINES
 CONTAM_DATASETS = ["iris", "wine", "breast_cancer", "multimodal", "rings"]
@@ -110,6 +112,17 @@ def run_split(dataset, seed, eps=0.0, scaler="standard"):
         vt = KohonenDA2(scoring="joint", trim=trim, random_state=seed).fit(Xtr, ytr)
         add(name, vt.predict(Xte), time.perf_counter() - t0)
 
+    t0 = time.perf_counter()
+    v3 = KohonenDA3(covariance="diag", random_state=seed).fit(Xtr, ytr)
+    t = time.perf_counter() - t0
+    for scoring in ("density", "joint_density", "joint_sorted"):
+        v3.set_params(scoring=scoring)
+        add(f"v3_{scoring}", v3.predict(Xte), t)
+    for trim, name in [(0.1, "v3_density_t10"), (0.2, "v3_density_t20")]:
+        t0 = time.perf_counter()
+        v3t = KohonenDA3(covariance="diag", trim=trim, random_state=seed).fit(Xtr, ytr)
+        add(name, v3t.predict(Xte), time.perf_counter() - t0)
+
     for name in BASELINES:
         t0 = time.perf_counter()
         est = baseline(name, seed).fit(Xtr, ytr)
@@ -123,7 +136,7 @@ def run(tasks, n_jobs):
 
 
 # ------------------------------------------------------------------ reporting
-def summarise_clean(df):
+def summarise_clean(df, ref="v3_density"):
     acc = df.pivot_table(index="dataset", columns="method", values="acc", aggfunc="mean")
     acc = acc.loc[[d for d in ALL if d in acc.index], METHODS]
     ranks = acc.rank(axis=1, ascending=False)
@@ -137,21 +150,21 @@ def summarise_clean(df):
     fr = stats.friedmanchisquare(*[acc[m] for m in METHODS])
     print(f"\nFriedman test over datasets: chi2={fr.statistic:.2f}, p={fr.pvalue:.2e}")
 
-    print("\nv2_joint vs each method: paired Wilcoxon over splits per dataset (p<0.05)")
+    print(f"\n{ref} vs each method: paired Wilcoxon over splits per dataset (p<0.05)")
     rows = []
     for m in METHODS:
-        if m == "v2_joint":
+        if m == ref:
             continue
         better = worse = 0
         for d in acc.index:
             sub = df[df.dataset == d].pivot_table(index="seed", columns="method", values="acc")
-            diff = sub["v2_joint"] - sub[m]
+            diff = sub[ref] - sub[m]
             if (diff != 0).any():
-                p = stats.wilcoxon(sub["v2_joint"], sub[m], zero_method="zsplit").pvalue
+                p = stats.wilcoxon(sub[ref], sub[m], zero_method="zsplit").pvalue
                 if p < 0.05:
                     better += diff.mean() > 0
                     worse += diff.mean() < 0
-        rows.append(dict(method=m, v2_joint_sig_better=better, v2_joint_sig_worse=worse,
+        rows.append(dict(method=m, ref_sig_better=better, ref_sig_worse=worse,
                          ties=len(acc.index) - better - worse))
     print(pd.DataFrame(rows).to_string(index=False))
 

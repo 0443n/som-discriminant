@@ -2,5 +2,6 @@
 
 from .classifier import KohonenDA, sturges_bins
 from .v2 import KohonenDA2
+from .v3 import KohonenDA3
 
-__all__ = ["KohonenDA", "KohonenDA2", "sturges_bins"]
+__all__ = ["KohonenDA", "KohonenDA2", "KohonenDA3", "sturges_bins"]

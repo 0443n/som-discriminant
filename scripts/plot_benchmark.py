@@ -27,6 +27,7 @@ KEY = {
     "svm_rbf": ("SVM-RBF", "#eda100"),
     "rf": ("Random forest", "#e87ba4"),
     "v2_joint_t20": ("v2 joint, trim 0.2", "#008300"),
+    "v3_density_t20": ("v3 density, trim 0.2", "#6250d6"),
 }
 TITLES = {"iris": "Iris", "wine": "Wine", "breast_cancer": "Breast cancer",
           "multimodal": "Multimodal (synthetic)", "rings": "Rings (synthetic)"}

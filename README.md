@@ -150,7 +150,7 @@ Setup:
 | xor | .875 | .909 | .901 | .904 | .909 | .907 | .506 | **.959** | .508 | .945 | .935 | .935 | .931 |
 | heavy-tailed | .441 | .650 | .637 | .660 | .678 | .685 | .707 | .522 | .466 | .670 | .724 | **.738** | **.738** |
 
-Average rank over all 9 datasets, where 1 is best: SVM 2.56, RF 2.94, QDA 4.39, kNN 5.17, GMM3 5.67, **v2 joint t10 7.00**, LDA 7.17, v2 joint 7.50, v2 joint t20 7.89, nearest map 8.78, GNB 8.83, v2 pvalue 10.78, **v1 12.33**. The Friedman test gives χ²=58.5, p=4.2e-8.
+Average rank over all 9 datasets among these 13 methods (before v3 was added), where 1 is best: SVM 2.56, RF 2.94, QDA 4.39, kNN 5.17, GMM3 5.67, **v2 joint t10 7.00**, LDA 7.17, v2 joint 7.50, v2 joint t20 7.89, nearest map 8.78, GNB 8.83, v2 pvalue 10.78, **v1 12.33**. The Friedman test gives χ²=58.5, p=4.2e-8.
 
 v2 joint against each method, using a paired Wilcoxon test over splits within each dataset (p<0.05). Each cell counts datasets:
 
@@ -215,7 +215,7 @@ The SVM/RF/kNN/GMM baselines have no built-in way to pick a threshold. v2 does: 
 
 My hypothesis was that neighbourhood smoothing (σ) pulls prototypes between modes. **It was rejected:** σ=0.3 vs 1.0 changes accuracy by ≤ 0.02. A larger map helps modestly. Going from 3×3 to 4×4 gives (joint scoring) multimodal .859→.888, rings .754→.787, digits .951→.961 and wine .972→.978. That does not close the gap to GMM3 or kNN on multimodal.
 
-### What the benchmark says, honestly
+### What the benchmark says, honestly (v1/v2; see v3 below for the update)
 
 1. **v2 fixes v1.** It is significantly better on 9/9 datasets, and its outputs are always defined. On digits v1 collapses to .75, because in 64-D most test points fall outside every histogram.
 2. **Accuracy is not the method's selling point.** v2 joint is mid-pack, about level with LDA on average rank. SVM and RF beat it on almost every dataset, and kNN/QDA on most. On nonlinear data it beats LDA by a wide margin, but flexible methods beat it.
@@ -230,11 +230,106 @@ My hypothesis was that neighbourhood smoothing (σ) pulls prototypes between mod
 5. **Implication for a paper.** The defensible contribution is a careful, fully calibrated version of the 2023 idea: per-class prototype maps, cross-fitted conformal p-values, prediction sets, pooled novelty detection with a guaranteed false-reject rate, and trimmed training for robustness. It should be presented with an honest comparison, not as a more accurate classifier.
    - Caveat: the conformal wrapper is generic. Any score, including the kNN distance, could be calibrated the same way. Novelty therefore has to come from the combination plus the interpretability of a small set of per-class prototypes, not from the guarantee alone.
 
+## v3 (`KohonenDA3`, `kohonen_da/v3.py`): neuron-level statistics
+
+The benchmark showed that v2 throws away almost everything the maps learn: it keeps only one distance per map and one distance distribution per class. v3 keeps the SOMs and the cross-fitted conformal machinery, but uses the neurons themselves:
+
+| Idea | Implementation |
+|---|---|
+| **Per-neuron scale** | Each class map becomes a Gaussian mixture centred on its neurons. A neuron's weight is the number of training objects it wins (Laplace-smoothed). Its variance is estimated from those objects and shrunk towards the class-pooled variance (`shrinkage=5` pseudo-objects, `reg_var=1e-2`). The default is `covariance="diag"` (per neuron *and* feature), which automatically down-weights features that are noise around that neuron. |
+| **`scoring="density"`** | Bayes rule: argmax_c log p(x\|c) + log prior_c |
+| **Class-wise p-values / novelty** | Nonconformity −log p(x\|c) per class; pooled novelty uses −log Σ_c prior_c p(x\|c). Calibrated on out-of-fold scores. |
+| **More than the nearest neuron** | `"joint_sorted"`: logistic regression on the *sorted* log distances to all neurons of every map. Sorting makes the features independent of neuron order, so fold maps and the final maps are comparable. `"joint_density"`: logistic regression on log-likelihoods relative to the best class, clipped. |
+| **`trim`** | As in v2, but the trimmed objects are also excluded from the neuron statistics. Without that, the excluded outliers get assigned to normal neurons and inflate their variances: an earlier version of v3 got *worse* with trimming. |
+
+### Clean data (same 50 splits as above)
+
+| dataset | v2 joint | **v3 density** | v3 joint density | v3 joint sorted | v3 density t10 | v3 density t20 | QDA | GMM3 | kNN5 | SVM | RF |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| iris | .952 | .953 | .945 | .944 | .951 | .948 | **.978** | .959 | .948 | .957 | .948 |
+| wine | .969 | .978 | .973 | .978 | .972 | .973 | **.992** | .837 | .956 | .983 | .983 |
+| breast cancer | .953 | .953 | .953 | .956 | .941 | .935 | .962 | .953 | .965 | **.973** | .957 |
+| digits | .950 | .956 | .957 | .943 | .954 | .945 | .967 | .850 | .971 | **.979** | .974 |
+| multimodal | .854 | .956 | .956 | .876 | .950 | .935 | .896 | .958 | .919 | .934 | **.976** |
+| rings | .756 | .747 | .839 | .830 | .729 | .718 | .751 | .769 | .673 | .910 | **.939** |
+| moons | .843 | .885 | .884 | .859 | .878 | .871 | .852 | .881 | .880 | .865 | **.907** |
+| xor | .904 | .940 | .937 | .917 | .930 | .922 | **.959** | .945 | .935 | .935 | .931 |
+| heavy-tailed | .660 | .690 | .620 | .662 | .662 | .577 | .522 | .670 | .724 | **.738** | **.738** |
+
+Average rank among all 18 methods: RF 3.44, SVM 3.67, **v3 density 5.61**, QDA 6.17, v3 joint density 7.28, kNN 7.50, GMM3 7.89, v3 density t10 8.33, …, v2 joint 10.94, v1 17.33. The Friedman test gives χ²=75.7, p=2.2e-9.
+
+v3 density against each method, using a paired Wilcoxon test (p<0.05). Each cell counts datasets:
+
+| | v2 joint | kNN5 | GMM3 | QDA | LDA | SVM | RF |
+|---|---|---|---|---|---|---|---|
+| v3 density significantly better | 6 | 3 | 2 | 3 | 5 | 2 | 0 |
+| v3 density significantly worse | 0 | 3 | 1 | 5 | 1 | 4 | 5 |
+
+The fit time is about the same as v2 (2.0 s per split, 3.8 s with trim).
+
+### Open set (same protocol as above)
+
+| dataset | **v3 pooled (diag)** | v3 class-wise | v2 pooled | kNN dist | GMM loglik | Mahalanobis | SVM maxprob | RF maxprob |
+|---|---|---|---|---|---|---|---|---|
+| iris | .963 | .946 | .956 | .952 | .958 | **.985** | .947 | .563 |
+| wine | .960 | .952 | .965 | .968 | .866 | **.977** | .868 | .854 |
+| digits | .952 | .939 | .909 | .927 | .873 | .870 | .960 | **.965** |
+| multimodal | .945 | .941 | .838 | .885 | **.954** | .719 | .683 | .797 |
+| rings | .695 | .679 | .626 | .711 | **.725** | .545 | .367 | .521 |
+| heavy-tailed | .671 | .678 | .639 | .678 | .670 | .668 | .690 | **.712** |
+
+- **Average AUROC rank: v3 pooled is #1 of 12 (3.33).** It is followed by kNN dist 4.00, v3 class-wise 5.00, GMM 5.33, nearest map 5.83 and v2 pooled 6.33. It is also #1 by detection rate at 5% false rejects (4.00 vs SVM 5.00).
+- **Paired comparisons:** it is significantly better than v2 pooled on 5/6 datasets. Against the kNN distance it wins 3 and loses 1; against GMM it wins 2 and loses 2.
+
+With α=0.05 fixed in advance (no oracle), cells show false-reject rate / detection rate:
+
+| dataset | v2 pooled | **v3 pooled** |
+|---|---|---|
+| iris | .034 / .681 | .026 / .685 |
+| wine | .035 / .722 | .024 / .625 |
+| digits | .047 / .383 | .044 / **.696** |
+| multimodal | .044 / .199 | .033 / **.568** |
+| rings | .048 / .131 | .036 / .143 |
+| heavy-tailed | .039 / .044 | .029 / .033 |
+
+### Contamination (same protocol as above): absolute accuracy, mean over 5 datasets
+
+| ε | v2 joint t20 | v3 density | v3 density t10 | **v3 density t20** | LDA | kNN5 | SVM | RF |
+|---|---|---|---|---|---|---|---|---|
+| 0.00 | .860 | .902 | .892 | .883 | .780 | .866 | .933 | .961 |
+| 0.10 | .850 | .875 | .892 | .889 | .736 | .863 | .851 | .959 |
+| 0.20 | .848 | .839 | .870 | .890 | .718 | .859 | .795 | .956 |
+| 0.30 | .825 | .792 | .841 | .865 | .710 | .856 | .769 | .952 |
+
+Untrimmed v3 is fragile: it loses 11 points at ε=0.3, because outliers inflate the neuron variances. With `trim=0.2` it loses 1.8 points, the 3rd smallest drop after RF and kNN. It beats kNN in absolute accuracy at every ε. The price is about 2 points on clean data, versus about 1 for t10.
+
+### Sensitivity of the two new hyper-parameters (16 splits, all datasets)
+
+Over the grid shrinkage ∈ {1, 5, 20} × reg_var ∈ {1e-3, 1e-2, 1e-1}, mean accuracy over datasets stays between 0.8925 and 0.8966. The defaults (5, 1e-2) give 0.8961, essentially the top. The largest per-dataset spread is rings (0.056); everything else is ≤ 0.023. So the result does not depend on a lucky default.
+
+### Verdict after v3
+
+1. **Using the neurons properly was the missing piece.** Turning each map into a neuron-level Gaussian mixture moves the SOM approach from mid-pack to **3rd of 18 on accuracy**. Only RF and SVM are ahead. It is level with kNN and ahead of the per-class GMM it resembles.
+2. **It is the best unseen-class detector in the benchmark** (AUROC rank #1 of 12). It keeps a false-reject rate fixed in advance (2.4–4.4% at α=5%). Detection on digits and multimodal roughly doubles compared with v2.
+3. **With trimming it is robust**: −1.8 points at 30% gross errors. It beats kNN in absolute accuracy under contamination, at a small clean-data cost.
+4. **Limits:**
+   - RF and SVM remain more accurate.
+   - Heavy-tailed data stays hard: trimming hurts there, because it removes the genuine heavy tails.
+   - Rings needs the `joint_density` variant, and no single v3 variant wins everywhere.
+   - All of this is with fixed defaults on small and medium tabular data; larger or higher-dimensional data are untested.
+5. **For a paper**, the method now has a clear, honest profile: one model that gives
+   - accuracy competitive with standard non-parametric classifiers,
+   - calibrated per-class typicality and prediction sets,
+   - the best novelty detection in this benchmark, with a guaranteed false-reject rate,
+   - and robustness to contaminated training data,
+   - all built from a few interpretable prototypes per class.
+
 ## Layout
 
 ```
 kohonen_da/classifier.py     KohonenDA estimator (paper-faithful, v1)
 kohonen_da/v2.py             KohonenDA2 (conformal, cross-fitted, reject option)
+kohonen_da/v3.py             KohonenDA3 (neuron-level mixtures, richer stacking)
 kohonen_da/som.py            shared SOM training / BMU distances
 scripts/reproduce_paper.py   Section 4 reproduction + repeated-split study
 scripts/evaluate_v2.py       v2 vs v1 vs baselines: accuracy, coverage, open set
