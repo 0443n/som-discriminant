@@ -34,14 +34,14 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.validation import check_array, check_is_fitted, check_X_y
 
-from .som import auto_keep, bmu_distances, train_class_soms, trim_keep
+from .som import _chunks, auto_keep, bmu_distances, sq_dists, train_class_soms, trim_keep
 
 _EPS = 1e-12
 COVARIANCES = ("spherical", "diag")
 
 
 def _sq_dists(X, W):
-    return ((X[:, None, :] - W[None, :, :]) ** 2).sum(-1)
+    return sq_dists(X, W)
 
 
 class NeuronMixture:
@@ -86,10 +86,11 @@ class NeuronMixture:
         """(n_samples, n_classes) matrix of log p(x | c)."""
         out = np.empty((len(X), len(self.W)))
         for k, (W, var, lw) in enumerate(zip(self.W, self.var, self.log_w)):
-            diff2 = (X[:, None, :] - W[None, :, :]) ** 2
-            comp = lw - 0.5 * (np.log(2 * np.pi * var).sum(1)
-                               + (diff2 / var[None]).sum(-1))
-            out[:, k] = logsumexp(comp, axis=1)
+            logdet = np.log(2 * np.pi * var).sum(1)
+            for sl in _chunks(len(X), W.size):
+                diff2 = (X[sl, None, :] - W[None, :, :]) ** 2
+                comp = lw - 0.5 * (logdet + (diff2 / var[None]).sum(-1))
+                out[sl, k] = logsumexp(comp, axis=1)
         return out
 
 
@@ -188,19 +189,37 @@ class KohonenDA3(ClassifierMixin, BaseEstimator):
         self.mixtures_ = self._mixtures(self.soms_, X, y_idx)
         self.log_prior_ = np.log(np.bincount(y_idx, minlength=K) / len(y_idx))
 
-        self.class_calib_, self.novelty_calib_, self.joint_density_ = {}, {}, {}
+        self.class_calib_, self.novelty_calib_ = {}, {}
         for cov in COVARIANCES:
             L = oof_logd[cov]
             self.class_calib_[cov] = [np.sort(-L[y_idx == k, k]) for k in range(K)]
             self.novelty_calib_[cov] = np.sort(-logsumexp(L + self.log_prior_, axis=1))
-            self.joint_density_[cov] = self._lr().fit(_relative(L), y_idx)
-        self.joint_sorted_ = self._lr().fit(oof_sorted, y_idx)
-        # v2-style joint on log min distances (the first sorted feature of each map)
-        self.joint_min_ = self._lr().fit(oof_sorted[:, ::J], y_idx)
+        # stacking models are fitted lazily on first use (same data -> same result)
+        self.stackers_ = {}
         self.oof_log_density_ = oof_logd
         self.oof_sorted_ = oof_sorted
         self.y_idx_ = y_idx
         return self
+
+    def _stack_features(self, name, L=None, S=None):
+        J = self.map_size ** 2
+        if name.startswith("joint_density"):
+            return _relative(L)
+        if name == "joint_sorted":
+            return S
+        if name == "joint_min":  # v2-style: log distance to the nearest neuron per map
+            return S[:, ::J]
+        raise ValueError(name)
+
+    def _stacker(self, name):
+        """Logistic regression for a stacked scoring, fitted on out-of-fold features."""
+        if name not in self.stackers_:
+            if name.startswith("joint_density"):
+                F = _relative(self.oof_log_density_[name.split(":")[1]])
+            else:
+                F = self._stack_features(name, S=self.oof_sorted_)
+            self.stackers_[name] = self._lr().fit(F, self.y_idx_)
+        return self.stackers_[name]
 
     def oof_accuracy(self, scoring, covariance=None) -> float:
         """Out-of-fold accuracy of a scoring on the training data (for model selection).
@@ -253,13 +272,12 @@ class KohonenDA3(ClassifierMixin, BaseEstimator):
             L = self.mixtures_[self.covariance].log_density(X) + self.log_prior_
             return np.exp(L - logsumexp(L, axis=1, keepdims=True))
         if self.scoring == "joint_density":
-            return self.joint_density_[self.covariance].predict_proba(
+            return self._stacker(f"joint_density:{self.covariance}").predict_proba(
                 _relative(self.mixtures_[self.covariance].log_density(X)))
-        S = sorted_log_dists(self.soms_, X)
-        if self.scoring == "joint_sorted":
-            return self.joint_sorted_.predict_proba(S)
-        if self.scoring == "joint_min":
-            return self.joint_min_.predict_proba(S[:, ::self.map_size ** 2])
+        if self.scoring in ("joint_sorted", "joint_min"):
+            S = sorted_log_dists(self.soms_, X)
+            return self._stacker(self.scoring).predict_proba(
+                self._stack_features(self.scoring, S=S))
         raise ValueError(f"unknown scoring={self.scoring!r}")
 
     def predict(self, X) -> np.ndarray:

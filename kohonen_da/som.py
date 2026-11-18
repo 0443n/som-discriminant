@@ -22,6 +22,24 @@ def _fit_som(Xc, seed, *, map_size, sigma, learning_rate, neighborhood_function,
     return som
 
 
+CHUNK_ELEMS = 2 ** 22  # max elements of a temporary (rows, neurons, features) array
+
+
+def _chunks(n_rows, per_row):
+    step = max(1, CHUNK_ELEMS // max(1, per_row))
+    for i in range(0, n_rows, step):
+        yield slice(i, min(i + step, n_rows))
+
+
+def sq_dists(X, W) -> np.ndarray:
+    """(n, m) squared Euclidean distances, computed in memory-bounded row chunks
+    (same formula as full broadcasting, so results are bit-identical)."""
+    out = np.empty((len(X), len(W)))
+    for sl in _chunks(len(X), W.size):
+        out[sl] = ((X[sl, None, :] - W[None, :, :]) ** 2).sum(-1)
+    return out
+
+
 AUTO_TRIM_K = 3.0
 AUTO_TRIM_NEIGHBOURS = 5
 
@@ -47,9 +65,12 @@ def auto_keep(Xc):
     k = min(AUTO_TRIM_NEIGHBOURS, n - 1)
     if k < 1:
         return None
-    d = np.sqrt(((Xc[:, None, :] - Xc[None, :, :]) ** 2).sum(-1))
-    np.fill_diagonal(d, np.inf)
-    score = np.log(np.sort(d, axis=1)[:, :k].mean(1) + 1e-12)
+    knn = np.empty(n)
+    for sl in _chunks(n, Xc.size):
+        d = np.sqrt(((Xc[sl, None, :] - Xc[None, :, :]) ** 2).sum(-1))
+        d[np.arange(sl.stop - sl.start), np.arange(sl.start, sl.stop)] = np.inf
+        knn[sl] = np.sort(d, axis=1)[:, :k].mean(1)
+    score = np.log(knn + 1e-12)
     med = np.median(score)
     mad = 1.4826 * np.median(np.abs(score - med))
     if mad == 0:
@@ -106,5 +127,5 @@ def bmu_distances(soms, X) -> np.ndarray:
     out = np.empty((X.shape[0], len(soms)))
     for k, som in enumerate(soms):
         W = som.get_weights().reshape(-1, X.shape[1])
-        out[:, k] = np.sqrt(((X[:, None, :] - W[None, :, :]) ** 2).sum(-1)).min(1)
+        out[:, k] = np.sqrt(sq_dists(X, W)).min(1)
     return out
