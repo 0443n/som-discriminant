@@ -9,6 +9,7 @@ Scores
   v2_pooled      : -novelty p-value of min_c d_c(x)   (KohonenDA2, reject_mode="pooled")
   v3_pooled_*    : -novelty p-value, neuron-mixture likelihood (KohonenDA3, diag/spherical)
   v3_classwise_diag : -max_c p_c(x), class-wise p-values on -log p(x|c) (KohonenDA3)
+  v3_auto_pooled : as v3_pooled_diag, map size chosen out-of-fold (KohonenDA3Auto)
   nearest_map    : min_c d_c(x), raw BMU distance   (ablation: no conformal normalisation)
   knn_dist       : mean distance to the 5 nearest training objects
   gmm_loglik     : -max_c log p(x | c), per-class 3-component GMM
@@ -50,13 +51,14 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
-from kohonen_da import KohonenDA2, KohonenDA3
+from kohonen_da import KohonenDA2, KohonenDA3, KohonenDA3Auto
 from kohonen_da.baselines import GMMClassifier
 from kohonen_da.datasets import ALL
 
 OUT = Path(__file__).resolve().parent.parent / "results" / "benchmark"
 DATASETS = ["iris", "wine", "digits", "multimodal", "rings", "heavy_tailed"]
 SCORES = ["v2_conformal", "v2_pooled", "v3_pooled_diag", "v3_pooled_sph", "v3_classwise_diag",
+          "v3_auto_pooled",
           "nearest_map", "knn_dist", "gmm_loglik", "mahalanobis",
           "lda_maxprob", "svm_maxprob", "rf_maxprob"]
 ALPHA = 0.05
@@ -101,6 +103,8 @@ def run_one(dataset, unknown, seed):
     s["v3_classwise_diag"] = -v3.pvalues(Xall).max(1)
     v3.set_params(covariance="spherical")
     s["v3_pooled_sph"] = -v3.novelty_pvalues(Xall)
+    pna = KohonenDA3Auto(random_state=seed).fit(Xtr, ytr).novelty_pvalues(Xall)
+    s["v3_auto_pooled"] = -pna
     s["nearest_map"] = v2.bmu_distances(Xall).min(1)
     s["knn_dist"] = NearestNeighbors(n_neighbors=5).fit(Xtr).kneighbors(Xall)[0].mean(1)
     s["gmm_loglik"] = -GMMClassifier(3, random_state=seed).fit(Xtr, ytr) \
@@ -120,7 +124,7 @@ def run_one(dataset, unknown, seed):
                          det5=det_at(sc_[:nk], sc_[nk:])))
     # a-priori conformal operating point (no oracle)
     for name, rej in [("apriori_classwise", P.max(1) < ALPHA), ("apriori_pooled", pn < ALPHA),
-                      ("apriori_v3_pooled_diag", pn3 < ALPHA)]:
+                      ("apriori_v3_pooled_diag", pn3 < ALPHA), ("apriori_v3_auto", pna < ALPHA)]:
         rows.append(dict(dataset=dataset, unknown=unknown, seed=seed, score=name,
                          frr=float(rej[:nk].mean()), det=float(rej[nk:].mean())))
     return rows

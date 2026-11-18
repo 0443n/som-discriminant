@@ -256,7 +256,7 @@ The benchmark showed that v2 throws away almost everything the maps learn: it ke
 | xor | .904 | .940 | .937 | .917 | .930 | .922 | **.959** | .945 | .935 | .935 | .931 |
 | heavy-tailed | .660 | .690 | .620 | .662 | .662 | .577 | .522 | .670 | .724 | **.738** | **.738** |
 
-Average rank among all 18 methods: RF 3.44, SVM 3.67, **v3 density 5.61**, QDA 6.17, v3 joint density 7.28, kNN 7.50, GMM3 7.89, v3 density t10 8.33, …, v2 joint 10.94, v1 17.33. The Friedman test gives χ²=75.7, p=2.2e-9.
+Average rank among the 18 methods present before the auto variants were added: RF 3.44, SVM 3.67, **v3 density 5.61**, QDA 6.17, v3 joint density 7.28, kNN 7.50, GMM3 7.89, v3 density t10 8.33, …, v2 joint 10.94, v1 17.33. The Friedman test gives χ²=75.7, p=2.2e-9.
 
 v3 density against each method, using a paired Wilcoxon test (p<0.05). Each cell counts datasets:
 
@@ -307,15 +307,55 @@ Untrimmed v3 is fragile: it loses 11 points at ε=0.3, because outliers inflate 
 
 Over the grid shrinkage ∈ {1, 5, 20} × reg_var ∈ {1e-3, 1e-2, 1e-1}, mean accuracy over datasets stays between 0.8925 and 0.8966. The defaults (5, 1e-2) give 0.8961, essentially the top. The largest per-dataset spread is rings (0.056); everything else is ≤ 0.023. So the result does not depend on a lucky default.
 
+### v3 auto: automatic map size / scoring + adaptive trimming
+
+- **`trim="auto"`:**
+  - It removes only robust outliers within each class: objects whose log mean distance to their 5 nearest same-class neighbours exceeds median + 3·1.4826·MAD.
+  - This is computed on the data, *not* on a SOM. A first attempt used the distance to the best-matching neuron and failed: at 30% contamination it caught 0–14% of the outliers, because gross outliers capture neurons of their own and look well-fitted.
+  - The same keep set is used for SOM training and for the neuron statistics.
+- **`KohonenDA3Auto`:**
+  - It fits v3 with 3×3, 4×4 and 5×5 maps and scores `density` / `joint_density` / `joint_sorted` by out-of-fold accuracy. The stacked variants are scored by nested `cross_val_predict`.
+  - It keeps the best combination. Ties go to the smaller map and the simpler scoring. No test data is used.
+  - This also answers the 2023 paper's open question of how to choose the map size.
+
+Clean data, mean accuracy over the 9 datasets (all 21 methods in `clean.csv`): RF .928, SVM .919, **v3 auto + adaptive trim .907**, v3 auto .906, v3 density .896, v3 density adaptive-trim .895, kNN .886, v3 density t20 .885. Average rank: RF 4.11, SVM 4.44, **v3 auto + adaptive trim 6.89**, v3 density 6.94, v3 auto 7.39, QDA 7.39, kNN 9.06. v3 auto + adaptive trim is never significantly worse than v3 density and significantly better on 3 datasets (rings .747→.850, digits .956→.964, breast cancer).
+
+Choices the auto variant made (most frequent):
+
+| dataset | choice |
+|---|---|
+| iris, wine, multimodal, moons, XOR, heavy-tailed | mostly 3×3 / `density` |
+| digits | 4×4–5×5 / `density` |
+| breast cancer, rings | 4×4–5×5 / `joint_sorted` |
+
+Contamination, absolute accuracy (mean over 5 datasets):
+
+| ε | v3 density | v3 density t20 | v3 density adaptive trim | v3 auto | **v3 auto + adaptive trim** | kNN5 | SVM | RF |
+|---|---|---|---|---|---|---|---|---|
+| 0.00 | .902 | .883 | .901 | .924 | **.918** | .866 | .933 | .961 |
+| 0.10 | .875 | .889 | .899 | .880 | **.909** | .863 | .851 | .959 |
+| 0.20 | .839 | .890 | .893 | .855 | **.894** | .859 | .795 | .956 |
+| 0.30 | .792 | .865 | .856 | .824 | **.860** | .856 | .769 | .952 |
+
+- Adaptive trimming has no clean-data cost (fixed 20% costs about 2 points). It matches fixed trimming up to ε=0.2.
+- v3 auto + adaptive trim beats kNN at every ε and SVM from ε=0.05.
+- Rings remains the weak case: −17 points at ε=0.3.
+
+Open set: v3 auto (pooled novelty) has AUROC rank **#1 of 13 (3.58)**, ahead of v3 pooled 3.92 and kNN dist 4.67. Rings goes .695→.723. With α=0.05 fixed in advance, the false-reject rate is ≤ 3.9% on every dataset.
+
+Cost: about 4× the fit time of v3 (8.4 s per split vs 2.0 s; RF 0.8 s).
+
+**Recommended default: `KohonenDA3Auto(trim="auto")`.**
+
 ### Verdict after v3
 
-1. **Using the neurons properly was the missing piece.** Turning each map into a neuron-level Gaussian mixture moves the SOM approach from mid-pack to **3rd of 18 on accuracy**. Only RF and SVM are ahead. It is level with kNN and ahead of the per-class GMM it resembles.
+1. **Using the neurons properly was the missing piece.** Turning each map into a neuron-level Gaussian mixture moves the SOM approach from mid-pack to **3rd on accuracy** (of 18, and of 21 with the auto variants). Only RF and SVM are ahead. It is level with kNN and ahead of the per-class GMM it resembles.
 2. **It is the best unseen-class detector in the benchmark** (AUROC rank #1 of 12). It keeps a false-reject rate fixed in advance (2.4–4.4% at α=5%). Detection on digits and multimodal roughly doubles compared with v2.
-3. **With trimming it is robust**: −1.8 points at 30% gross errors. It beats kNN in absolute accuracy under contamination, at a small clean-data cost.
+3. **With trimming it is robust.** Adaptive trimming costs nothing on clean data. `KohonenDA3Auto(trim="auto")` beats kNN in absolute accuracy at every contamination level.
 4. **Limits:**
    - RF and SVM remain more accurate.
    - Heavy-tailed data stays hard: trimming hurts there, because it removes the genuine heavy tails.
-   - Rings needs the `joint_density` variant, and no single v3 variant wins everywhere.
+   - Automatic selection handles the "no single variant wins everywhere" problem, at 4× the fit time.
    - All of this is with fixed defaults on small and medium tabular data; larger or higher-dimensional data are untested.
 5. **For a paper**, the method now has a clear, honest profile: one model that gives
    - accuracy competitive with standard non-parametric classifiers,
@@ -329,7 +369,7 @@ Over the grid shrinkage ∈ {1, 5, 20} × reg_var ∈ {1e-3, 1e-2, 1e-1}, mean a
 ```
 kohonen_da/classifier.py     KohonenDA estimator (paper-faithful, v1)
 kohonen_da/v2.py             KohonenDA2 (conformal, cross-fitted, reject option)
-kohonen_da/v3.py             KohonenDA3 (neuron-level mixtures, richer stacking)
+kohonen_da/v3.py             KohonenDA3 (neuron-level mixtures, richer stacking), KohonenDA3Auto
 kohonen_da/som.py            shared SOM training / BMU distances
 scripts/reproduce_paper.py   Section 4 reproduction + repeated-split study
 scripts/evaluate_v2.py       v2 vs v1 vs baselines: accuracy, coverage, open set

@@ -112,3 +112,25 @@ def test_trim_keeps_variances_clean(iris):
     clean = KohonenDA3(random_state=0).fit(X, y)
     v_clean = np.median([np.median(a) for a in clean.mixtures_["diag"].var])
     assert abs(np.log(v[0.25] / v_clean)) < abs(np.log(v[0.0] / v_clean))
+
+
+def test_auto_trim_drops_gross_outliers_only():
+    from kohonen_da.som import auto_keep
+    rng = np.random.default_rng(0)
+    clean = rng.normal(size=(100, 4))
+    keep = auto_keep(clean)
+    assert keep is None or len(keep) >= 90
+    dirty = np.vstack([clean, rng.normal(size=(20, 4)) * 10 + 30])
+    keep = auto_keep(dirty)
+    assert keep is not None and set(range(100, 120)).isdisjoint(keep)
+
+
+def test_auto_selection(iris):
+    from kohonen_da.v3 import KohonenDA3Auto
+    X, y = iris
+    m = KohonenDA3Auto(map_sizes=(2, 3), random_state=0).fit(X, y)
+    assert len(m.selection_) == 2 * 3
+    assert m.selection_[(m.map_size_, m.scoring_)] == max(m.selection_.values())
+    P = m.predict_proba(X)
+    assert np.allclose(P.sum(1), 1) and (m.predict(X) == y).mean() > 0.9
+    assert m.novelty_pvalues(X).shape == (len(X),)

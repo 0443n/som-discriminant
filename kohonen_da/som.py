@@ -1,4 +1,4 @@
-"""SOM helpers shared by the v1 (paper) and v2 classifiers."""
+"""SOM helpers shared by the v1, v2 and v3 classifiers."""
 
 from __future__ import annotations
 
@@ -22,6 +22,53 @@ def _fit_som(Xc, seed, *, map_size, sigma, learning_rate, neighborhood_function,
     return som
 
 
+AUTO_TRIM_K = 3.0
+AUTO_TRIM_NEIGHBOURS = 5
+
+
+def check_trim(trim):
+    if isinstance(trim, str):
+        if trim != "auto":
+            raise ValueError("trim must be a float in [0, 1) or 'auto'")
+    elif not 0.0 <= trim < 1.0:
+        raise ValueError("trim must be in [0, 1)")
+
+
+def auto_keep(Xc):
+    """Indices of a class's objects that are not robust outliers ("auto" trimming).
+
+    Outlier score: mean distance to the 5 nearest objects of the same class (computed
+    on the data, not on a SOM: gross outliers capture neurons of their own, which makes
+    their BMU distance small and hides them). An object is dropped if its log score
+    exceeds median + 3 * 1.4826 * MAD; this tolerates up to 50% contamination and drops
+    very little from clean data. Returns None if nothing is dropped.
+    """
+    n = len(Xc)
+    k = min(AUTO_TRIM_NEIGHBOURS, n - 1)
+    if k < 1:
+        return None
+    d = np.sqrt(((Xc[:, None, :] - Xc[None, :, :]) ** 2).sum(-1))
+    np.fill_diagonal(d, np.inf)
+    score = np.log(np.sort(d, axis=1)[:, :k].mean(1) + 1e-12)
+    med = np.median(score)
+    mad = 1.4826 * np.median(np.abs(score - med))
+    if mad == 0:
+        return None
+    keep = np.flatnonzero(score <= med + AUTO_TRIM_K * mad)
+    return keep if len(keep) < n else None
+
+
+def trim_keep(d, trim):
+    """Indices kept by fixed-fraction trimming, given BMU distances `d` (None = keep all).
+
+    Drops the `trim` share with the largest distance (kept in order of distance).
+    """
+    n_keep = int(np.ceil((1.0 - trim) * len(d)))
+    if trim > 0 and n_keep < len(d):
+        return np.argsort(d, kind="stable")[:n_keep]
+    return None
+
+
 def train_class_soms(X, y, classes, *, map_size, sigma, learning_rate,
                      neighborhood_function, n_iterations, rng, trim=0.0):
     """Train one square SOM per class on that class's samples only.
@@ -29,24 +76,27 @@ def train_class_soms(X, y, classes, *, map_size, sigma, learning_rate,
     Weights are initialised with random samples of the class (as in the paper).
     `rng` is a numpy Generator; one seed is drawn from it per class.
 
-    trim : fraction in [0, 1). If > 0, after a first fit the `trim` share of the class's
-        samples with the largest BMU distance is dropped and the map is re-initialised
-        and retrained on the rest (robustness to gross outliers in the training data).
+    trim : fraction in [0, 1) or "auto".
+        float: after a first fit, the `trim` share of the class's samples with the largest
+        BMU distance is dropped and the map is re-initialised and retrained on the rest.
+        "auto": robust outliers (see `auto_keep`) are removed before the (single) fit.
     """
-    if not 0.0 <= trim < 1.0:
-        raise ValueError("trim must be in [0, 1)")
+    check_trim(trim)
     kw = dict(map_size=map_size, sigma=sigma, learning_rate=learning_rate,
               neighborhood_function=neighborhood_function, n_iterations=n_iterations)
     soms = []
     for c in classes:
         Xc = X[y == c]
         seed = int(rng.integers(2**31 - 1))
+        if trim == "auto":
+            keep = auto_keep(Xc)
+            soms.append(_fit_som(Xc if keep is None else Xc[keep], seed, **kw))
+            continue
         som = _fit_som(Xc, seed, **kw)
-        n_keep = int(np.ceil((1.0 - trim) * len(Xc)))
-        if trim > 0 and n_keep < len(Xc):
-            d = bmu_distances([som], Xc)[:, 0]
-            keep = np.argsort(d, kind="stable")[:n_keep]
-            som = _fit_som(Xc[keep], seed, **kw)
+        if trim:
+            keep = trim_keep(bmu_distances([som], Xc)[:, 0], trim)
+            if keep is not None:
+                som = _fit_som(Xc[keep], seed, **kw)
         soms.append(som)
     return soms
 

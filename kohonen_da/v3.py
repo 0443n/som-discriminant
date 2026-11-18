@@ -29,12 +29,12 @@ import numpy as np
 from scipy.special import logsumexp
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, cross_val_predict
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.validation import check_array, check_is_fitted, check_X_y
 
-from .som import bmu_distances, train_class_soms
+from .som import auto_keep, bmu_distances, train_class_soms, trim_keep
 
 _EPS = 1e-12
 COVARIANCES = ("spherical", "diag")
@@ -56,12 +56,13 @@ class NeuronMixture:
             Xc = X[y_idx == k]
             d2 = _sq_dists(Xc, W)
             bmu = d2.argmin(1)
-            if trim > 0:
+            if trim:
                 # same trimming as for the SOM fit: worst-fitting objects don't enter
                 # the neuron statistics either (they would inflate the variances)
-                n_keep = int(np.ceil((1.0 - trim) * len(Xc)))
-                keep = np.argsort(d2[np.arange(len(Xc)), bmu], kind="stable")[:n_keep]
-                Xc, bmu = Xc[keep], bmu[keep]
+                keep = (auto_keep(Xc) if trim == "auto"
+                        else trim_keep(np.sqrt(d2[np.arange(len(Xc)), bmu]), trim))
+                if keep is not None:
+                    Xc, bmu = Xc[keep], bmu[keep]
             R = Xc - W[bmu]
             J = len(W)
             n_j = np.bincount(bmu, minlength=J).astype(float)
@@ -197,7 +198,28 @@ class KohonenDA3(ClassifierMixin, BaseEstimator):
         # v2-style joint on log min distances (the first sorted feature of each map)
         self.joint_min_ = self._lr().fit(oof_sorted[:, ::J], y_idx)
         self.oof_log_density_ = oof_logd
+        self.oof_sorted_ = oof_sorted
+        self.y_idx_ = y_idx
         return self
+
+    def oof_accuracy(self, scoring, covariance=None) -> float:
+        """Out-of-fold accuracy of a scoring on the training data (for model selection).
+
+        "density" is evaluated directly on the out-of-fold log-likelihoods; stacked
+        scorings by an inner cross_val_predict on their out-of-fold features.
+        """
+        check_is_fitted(self, "oof_sorted_")
+        cov = covariance or self.covariance
+        y = self.y_idx_
+        L = self.oof_log_density_[cov]
+        if scoring == "density":
+            pred = (L + self.log_prior_).argmax(1)
+        else:
+            F = {"joint_density": _relative(L), "joint_sorted": self.oof_sorted_,
+                 "joint_min": self.oof_sorted_[:, ::self.map_size ** 2]}[scoring]
+            n_splits = int(min(5, np.bincount(y).min()))
+            pred = cross_val_predict(self._lr(), F, y, cv=n_splits)
+        return float((pred == y).mean())
 
     # --------------------------------------------------------------- inference
     def _check(self, X):
@@ -251,3 +273,79 @@ class KohonenDA3(ClassifierMixin, BaseEstimator):
                     pred = pred.astype(object)
                 pred[rejected] = self.reject_label
         return pred
+
+
+class KohonenDA3Auto(ClassifierMixin, BaseEstimator):
+    """KohonenDA3 with map size and scoring chosen by out-of-fold accuracy.
+
+    For every size in `map_sizes` a KohonenDA3 is fitted (its cross-fitting already
+    yields out-of-fold scores); every scoring in `scorings` is evaluated by
+    `KohonenDA3.oof_accuracy`, and the best (size, scoring) is kept. Ties go to the
+    smaller map, then to the earlier scoring in `scorings`. No test data is used.
+    Remaining parameters are passed to KohonenDA3.
+    """
+
+    def __init__(self, map_sizes=(3, 4, 5), scorings=("density", "joint_density", "joint_sorted"),
+                 covariance="diag", trim=0.0, shrinkage=5.0, reg_var=1e-2, cv=5, C=1.0,
+                 sigma=1.0, learning_rate=0.5, neighborhood_function="gaussian",
+                 n_iterations=1000, reject_alpha=None, reject_label=-1, random_state=None):
+        self.map_sizes = map_sizes
+        self.scorings = scorings
+        self.covariance = covariance
+        self.trim = trim
+        self.shrinkage = shrinkage
+        self.reg_var = reg_var
+        self.cv = cv
+        self.C = C
+        self.sigma = sigma
+        self.learning_rate = learning_rate
+        self.neighborhood_function = neighborhood_function
+        self.n_iterations = n_iterations
+        self.reject_alpha = reject_alpha
+        self.reject_label = reject_label
+        self.random_state = random_state
+
+    def fit(self, X, y):
+        X, y = check_X_y(X, y)
+        best, best_key, self.selection_ = None, None, {}
+        for i, size in enumerate(self.map_sizes):
+            m = KohonenDA3(
+                map_size=size, covariance=self.covariance, trim=self.trim,
+                shrinkage=self.shrinkage, reg_var=self.reg_var, cv=self.cv, C=self.C,
+                sigma=self.sigma, learning_rate=self.learning_rate,
+                neighborhood_function=self.neighborhood_function,
+                n_iterations=self.n_iterations, reject_alpha=self.reject_alpha,
+                reject_label=self.reject_label, random_state=self.random_state).fit(X, y)
+            for j, scoring in enumerate(self.scorings):
+                acc = m.oof_accuracy(scoring)
+                self.selection_[(size, scoring)] = acc
+                key = (acc, -i, -j)
+                if best_key is None or key > best_key:
+                    best_key, best = key, (m, scoring)
+        self.best_ = best[0].set_params(scoring=best[1])
+        self.map_size_, self.scoring_ = self.best_.map_size, best[1]
+        self.classes_ = self.best_.classes_
+        self.n_features_in_ = X.shape[1]
+        return self
+
+    def _b(self):
+        check_is_fitted(self, "best_")
+        return self.best_
+
+    def predict(self, X):
+        return self._b().predict(X)
+
+    def predict_proba(self, X):
+        return self._b().predict_proba(X)
+
+    def pvalues(self, X):
+        return self._b().pvalues(X)
+
+    def novelty_pvalues(self, X):
+        return self._b().novelty_pvalues(X)
+
+    def predict_set(self, X, alpha=0.05):
+        return self._b().predict_set(X, alpha)
+
+    def log_density(self, X):
+        return self._b().log_density(X)

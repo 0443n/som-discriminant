@@ -11,7 +11,8 @@ contamination  : a fraction eps of *training* objects get gross errors
 
 All hyper-parameters are fixed defaults (no tuning for any method); SOMs are 3x3 per
 class as in the paper. v2_joint_tNN = v2 joint with trim=0.NN (outlier-resistant maps).
-v3_* = KohonenDA3 (neuron-level diag mixtures), see kohonen_da/v3.py.
+v3_* = KohonenDA3 (neuron-level diag mixtures), see kohonen_da/v3.py; *_tauto = adaptive
+trimming; v3_auto* = KohonenDA3Auto (map size and scoring chosen out-of-fold).
 
 Usage:
   python scripts/benchmark.py clean [--runs 50]
@@ -46,13 +47,14 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import RobustScaler, StandardScaler
 from sklearn.svm import SVC
 
-from kohonen_da import KohonenDA, KohonenDA2, KohonenDA3
+from kohonen_da import KohonenDA, KohonenDA2, KohonenDA3, KohonenDA3Auto
 from kohonen_da.baselines import GMMClassifier
 from kohonen_da.datasets import ALL, REAL, SYNTHETIC
 
 OUT = Path(__file__).resolve().parent.parent / "results" / "benchmark"
 SOM_METHODS = ["v1", "nearest_map", "v2_pvalue", "v2_joint", "v2_joint_t10", "v2_joint_t20",
-               "v3_density", "v3_joint_density", "v3_joint_sorted", "v3_density_t10", "v3_density_t20"]
+               "v3_density", "v3_joint_density", "v3_joint_sorted", "v3_density_t10", "v3_density_t20",
+               "v3_density_tauto", "v3_auto", "v3_auto_trim"]
 BASELINES = ["lda", "qda", "gnb", "gmm3", "knn5", "svm_rbf", "rf"]
 METHODS = SOM_METHODS + BASELINES
 CONTAM_DATASETS = ["iris", "wine", "breast_cancer", "multimodal", "rings"]
@@ -90,9 +92,9 @@ def run_split(dataset, seed, eps=0.0, scaler="standard"):
 
     rows = []
 
-    def add(method, pred, t):
+    def add(method, pred, t, choice=""):
         rows.append(dict(dataset=dataset, seed=seed, eps=eps, method=method,
-                         acc=float((pred == yte).mean()), fit_s=t))
+                         acc=float((pred == yte).mean()), fit_s=t, choice=choice))
 
     t0 = time.perf_counter()
     v1 = KohonenDA(random_state=seed).fit(Xtr, ytr)  # histograms on train (no leakage)
@@ -122,6 +124,14 @@ def run_split(dataset, seed, eps=0.0, scaler="standard"):
         t0 = time.perf_counter()
         v3t = KohonenDA3(covariance="diag", trim=trim, random_state=seed).fit(Xtr, ytr)
         add(name, v3t.predict(Xte), time.perf_counter() - t0)
+
+    t0 = time.perf_counter()
+    v3a = KohonenDA3(covariance="diag", trim="auto", random_state=seed).fit(Xtr, ytr)
+    add("v3_density_tauto", v3a.predict(Xte), time.perf_counter() - t0)
+    for trim, name in [(0.0, "v3_auto"), ("auto", "v3_auto_trim")]:
+        t0 = time.perf_counter()
+        au = KohonenDA3Auto(trim=trim, random_state=seed).fit(Xtr, ytr)
+        add(name, au.predict(Xte), time.perf_counter() - t0, f"{au.map_size_}x{au.map_size_}/{au.scoring_}")
 
     for name in BASELINES:
         t0 = time.perf_counter()
@@ -171,6 +181,11 @@ def summarise_clean(df, ref="v3_density"):
     t = df.groupby("method").fit_s.mean().loc[METHODS]
     print("\nMean fit time per split, s:")
     print(t.round(3).to_string())
+    if "choice" in df.columns:
+        ch = df[df.method == "v3_auto"].groupby("dataset").choice.agg(
+            lambda c: ", ".join(f"{k} {v}" for k, v in c.value_counts().head(3).items()))
+        print("\nv3_auto choices (most frequent first):")
+        print(ch.loc[[d for d in ALL if d in ch.index]].to_string())
     return acc, ranks
 
 
