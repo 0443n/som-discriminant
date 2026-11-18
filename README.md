@@ -364,6 +364,84 @@ Cost: about 4× the fit time of v3 (8.4 s per split vs 2.0 s; RF 0.8 s).
    - and robustness to contaminated training data,
    - all built from a few interpretable prototypes per class.
 
+## Larger datasets (`scripts/benchmark_large.py`): a held-out check
+
+None of these 7 OpenML datasets were used while v2/v3 were developed:
+
+| dataset | samples | features | classes | notes |
+|---|---|---|---|---|
+| segment | 2.3k | 18 | 7 | |
+| satimage | 6.4k | 36 | 6 | |
+| optdigits | 5.6k | 62 | 10 | |
+| pendigits | 11k | 16 | 10 | |
+| covertype | 20k | 53 | 7 | stratified subsample; 44 of the columns are 0/1 indicators; classes from 94 to 9.7k objects |
+| MNIST | 20k | 50 | 10 | stratified subsample, PCA to 50 components |
+| letter | 20k | 16 | 26 | |
+
+- **Splits:** 5 stratified 68/32 splits per dataset.
+- **Recommended model:** `KohonenDA3Auto(trim="auto")` with candidate map sizes {3, 5, 8, 12}.
+  - A probe on pendigits/letter showed that the paper's "5–12 neurons per class" rule does not carry over: with thousands of objects per class, letter goes from .852 with 3×3 maps to .951 with 12×12.
+  - Longer SOM training (10 epochs instead of 1000 iterations) added ≤ .007, so it was not used.
+
+```bash
+.venv/bin/python -I scripts/benchmark_large.py clean     # ~90 min on 12 workers
+.venv/bin/python -I scripts/benchmark_large.py openset   # ~40 min
+```
+
+### Closed set: mean accuracy
+
+| dataset | v1 | v2 joint | v3 density 3×3 | **v3 auto + trim** | LDA | QDA | GNB | GMM3 | kNN5 | SVM | RF |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| segment | .717 | .905 | .906 | .940 | .914 | .879 | .789 | .915 | .937 | .936 | **.973** |
+| satimage | .752 | .872 | .865 | .891 | .838 | .856 | .798 | .870 | .905 | .895 | **.915** |
+| optdigits | .460 | .948 | .959 | .973 | .952 | .971 | .670 | .960 | .976 | **.982** | **.982** |
+| pendigits | .929 | .969 | .976 | .991 | .873 | .984 | .855 | .991 | .992 | **.994** | .990 |
+| covertype | .264 | .613 | .441 | .468 | .676 | .298 | .092 | .493 | .772 | .739 | **.830** |
+| MNIST (PCA-50) | .546 | .858 | .895 | .948 | .861 | .960 | .870 | .959 | .943 | **.970** | .935 |
+| letter | .593 | .786 | .853 | .948 | .699 | .879 | .640 | .948 | .935 | .938 | **.960** |
+
+Average rank: RF 2.36, SVM 2.50, kNN 3.14, **v3 auto + trim 3.79**, GMM3 4.64, QDA 6.43, v3 density 3×3 7.14, v2 joint 7.57, LDA 7.86, GNB 10.00, v1 10.57.
+
+Paired t-tests over the 5 splits (p<0.05), counting datasets:
+- v3 auto + trim vs kNN: better on 1, worse on 1, tied on 5.
+- vs SVM: better 1, worse 4.
+- vs RF: better 1, worse 5.
+- It is better than v1, v2 and v3 3×3 on 6/7.
+
+**Without covertype**, the mean accuracy is v3 auto .949, kNN .948, SVM .953, RF .959.
+
+Map sizes chosen: mostly 12×12 (the largest candidate). Scoring: `density` on pendigits and letter, `joint_sorted` elsewhere.
+
+**Fit time per split is the practical weak point.** For example, letter takes 58 min and covertype 57 min, against seconds for SVM/RF. Most of it is the nested cross-validation of the `joint_sorted` stacker on large maps; v3 at a fixed 3×3 takes 3–31 s.
+
+### Open set: a random 30% of the classes are unseen
+
+AUROC:
+
+| dataset | **v3 auto (pooled)** | v2 pooled | kNN dist | GMM loglik | Mahalanobis | SVM maxprob | RF maxprob |
+|---|---|---|---|---|---|---|---|
+| segment | **.935** | .905 | .922 | .927 | .884 | .762 | .904 |
+| satimage | **.888** | .852 | .873 | .812 | .695 | .780 | .822 |
+| optdigits | .954 | .907 | .942 | .954 | .879 | .955 | **.968** |
+| pendigits | **.991** | .964 | .988 | .987 | .917 | .978 | .970 |
+| covertype | .638 | .572 | **.737** | .587 | .716 | .411 | .502 |
+| MNIST (PCA-50) | .861 | .724 | .818 | .922 | .837 | **.939** | .914 |
+| letter | .949 | .819 | .918 | **.955** | .720 | .863 | .917 |
+
+Average AUROC rank: **v3 auto 2.14 (1st of 7)**, GMM 3.00, kNN 3.14, RF 4.00, SVM 4.57, v2 pooled 5.29, Mahalanobis 5.86.
+
+With α=0.05 fixed in advance, the false-reject rate is 3.7–4.6% on every dataset. Detection rates: pendigits .97, letter .70, optdigits .69, satimage .58, segment .43, MNIST .38, covertype .14.
+
+### What the held-out check says
+
+1. **The design generalises to unseen, larger data.**
+   - Closed set: v3 auto is 4th of 11, statistically level with kNN on 5/7 datasets.
+   - Open set: it is the best unseen-class detector again (1st of 7).
+   - The conformal false-reject guarantee holds everywhere.
+2. **Map size must scale with the data.** Automatic selection handles this. The largest candidate (12×12) was usually chosen, so even larger maps might help a little.
+3. **A clear limitation is mixed or binary features.** On covertype, a Gaussian neuron model on 0/1 indicator columns breaks down, as it does for every density method (GNB .09, QDA .30, GMM3 .49). The method is meant for continuous features.
+4. **Cost.** Automatic selection with large maps is slow. Selecting the map size with `density` only, or on a subsample, is the obvious next optimisation.
+
 ## Layout
 
 ```
@@ -375,6 +453,8 @@ scripts/reproduce_paper.py   Section 4 reproduction + repeated-split study
 scripts/evaluate_v2.py       v2 vs v1 vs baselines: accuracy, coverage, open set
 scripts/benchmark.py         9-dataset benchmark + contamination experiment
 scripts/openset.py           open-set recognition benchmark
+scripts/benchmark_large.py   held-out benchmark on 7 larger OpenML datasets
+kohonen_da/large_datasets.py OpenML loaders (cached in data/, git-ignored)
 scripts/plot_benchmark.py    contamination figure
 kohonen_da/datasets.py       real + synthetic benchmark datasets
 kohonen_da/baselines.py      per-class GMM classifier
