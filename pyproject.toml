@@ -1,0 +1,15 @@
+[project]
+name = "kohonen-da"
+version = "0.1.0"
+description = "Discriminant analysis based on Kohonen statistics (Komarov & Kuravsky, MDA 2023) — reproduction and extensions"
+requires-python = ">=3.10"
+dependencies = ["numpy", "scikit-learn", "minisom", "matplotlib", "pandas"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools]
+packages = ["kohonen_da"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
