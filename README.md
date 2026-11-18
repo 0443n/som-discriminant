@@ -61,13 +61,70 @@ Single illustrative run (seed 0) gives 47/48 vs LDA 48/48; the paper's 46/48 is 
 4. **The histogram step currently adds nothing.** Plain "nearest map wins" (0.958) is as good as or better than the honest histogram variants.
 5. **The claim "strictly no worse than Fisher LDA" does not hold.** On iris, LDA is better on average and on most paired splits under every protocol.
 
-These are the targets for the improved method: smooth or monotone class scores (tail probability / KDE), a proper calibration scheme, and a reject option.
+These are the targets for the improved method, implemented below as v2.
+
+## v2 (`KohonenDA2`, `kohonen_da/v2.py`)
+
+| 2023 weakness | v2 fix |
+|---|---|
+| Bin lookup: zero outside the histogram range, bin mass ≠ density, not comparable across classes | **Class-conditional conformal p-value** of the BMU distance: `p_c(x) = (1 + #{calib d ≥ d_c(x)}) / (n_c + 1)`. Never 0, monotone, no bins, and uniform under class *c*, so comparable across classes |
+| Histograms fitted on the evaluation set | **Cross-fitted calibration**: out-of-fold BMU distances (5 folds); final maps refit on all data |
+| Compares p(d₁\|1), p(d₂\|2), … (different variables) | Optional **`scoring="joint"`**: logistic regression on log distances to *all* maps → P(c \| d₁…d_K) |
+| No "none of the above" | **Reject option** (`reject_alpha`) and **prediction sets**: P(true class excluded) ≤ α |
+
+Run: `.venv/bin/python scripts/evaluate_v2.py [--dataset iris|wine|breast_cancer] [--scale]`
+
+### Closed-set accuracy (same splits for all methods; test = 32%)
+
+| Method | iris (200 splits, raw) | wine (100 splits, standardised) |
+|---|---|---|
+| v1, paper protocol (leaky) | 0.964 | 0.929 |
+| v1, honest (train-cal + nearest-map fallback) | 0.949 | 0.898 |
+| nearest map only | 0.958 | 0.947 |
+| **v2 `pvalue`** | 0.957 | 0.936 |
+| **v2 `joint`** | 0.954 | **0.973** |
+| Fisher LDA | 0.978 | 0.982 |
+| QDA | 0.976 | 0.989 |
+| kNN (k=5) | 0.963 | 0.959 |
+
+### Conformal coverage: P(p_true < α) on test objects (should be ≤ α)
+
+| α | iris | wine |
+|---|---|---|
+| 0.05 | 0.027 | 0.037 |
+| 0.10 | 0.077 | 0.074 |
+| 0.20 | 0.163 | 0.170 |
+
+### Open set: train on 2 classes, then show held-out known objects plus all objects of the unseen class
+
+Each cell shows the false-reject rate on known classes / the detection rate on the unseen class.
+
+| Unseen class | v2 α=0.05 | v2 α=0.20 | v1 (all-zero = reject) | v2 AUROC |
+|---|---|---|---|---|
+| iris setosa | 0.017 / 1.000 | 0.132 / 1.000 | 0.141 / 1.000 | 0.992 |
+| iris versicolor | 0.024 / 0.336 | 0.154 / 0.836 | 0.146 / 0.749 | 0.914 |
+| iris virginica | 0.020 / 0.746 | 0.146 / 0.885 | 0.159 / 0.888 | 0.940 |
+| wine 0 | 0.025 / 0.401 | 0.167 / 0.902 | 0.148 / 0.776 | 0.937 |
+| wine 1 | 0.039 / 0.723 | 0.161 / 0.961 | 0.203 / 0.965 | 0.969 |
+| wine 2 | 0.033 / 0.468 | 0.142 / 0.821 | 0.107 / 0.701 | 0.927 |
+
+### Takeaways so far
+
+- v2 beats the *honest* 2023 method everywhere and never produces undefined outputs.
+- `joint` scoring is the big accuracy gain on wine: 1.5 errors vs 5.8 for honest v1, against LDA's 1.0.
+- `pvalue` scoring ≈ nearest map for accuracy; its value lies in calibrated typicality, the reject option and prediction sets.
+- Coverage holds, slightly conservatively. The likely cause is that the final maps are trained on more data than the fold maps.
+- Open set: v2 lets you *choose* the false-reject rate (v1's is an accident of histogram ranges). At comparable false-reject rates it detects unseen classes as well or better.
+- On these near-Gaussian datasets LDA/QDA are still best. The method's niche has to be shown on non-Gaussian, multimodal or outlier-contaminated data (next step).
 
 ## Layout
 
 ```
-kohonen_da/classifier.py     KohonenDA estimator (paper-faithful)
+kohonen_da/classifier.py     KohonenDA estimator (paper-faithful, v1)
+kohonen_da/v2.py             KohonenDA2 (conformal, cross-fitted, reject option)
+kohonen_da/som.py            shared SOM training / BMU distances
 scripts/reproduce_paper.py   Section 4 reproduction + repeated-split study
+scripts/evaluate_v2.py       v2 vs v1 vs baselines: accuracy, coverage, open set
 tests/                       unit tests
-results/                     fig3_reproduction.png, repeated_runs.csv
+results/                     figures and per-split CSVs
 ```
