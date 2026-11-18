@@ -117,6 +117,73 @@ Each cell shows the false-reject rate on known classes / the detection rate on t
 - Open set: v2 lets you *choose* the false-reject rate (v1's is an accident of histogram ranges). At comparable false-reject rates it detects unseen classes as well or better.
 - On these near-Gaussian datasets LDA/QDA are still best. The method's niche has to be shown on non-Gaussian, multimodal or outlier-contaminated data (next step).
 
+## Benchmark (`scripts/benchmark.py`)
+
+Setup:
+- **Datasets:** 4 real (iris, wine, breast cancer, digits) and 5 synthetic non-Gaussian (`kohonen_da/datasets.py`). The synthetic sets are multimodal (3 blobs per class), rings, moons, XOR and heavy-tailed (Student-t, df=1.5). Each synthetic set has 2 informative dimensions plus 2 pure-noise dimensions.
+- **Splits:** 50 repeated stratified 68/32 splits, with features standardised on the training part.
+- **Hyper-parameters:** library defaults for every method, with no tuning anywhere. SOMs are 3×3 per class, as in the paper.
+- **`gmm3`:** a per-class 3-component Gaussian mixture with the Bayes rule (`kohonen_da/baselines.py`). It is the parametric counterpart of "one SOM per class".
+
+```bash
+.venv/bin/python scripts/benchmark.py clean           # ~2 min on 16 cores
+.venv/bin/python scripts/benchmark.py contamination   # ~3 min
+.venv/bin/python scripts/plot_benchmark.py
+```
+
+### Clean data: mean accuracy
+
+| dataset | v1 | nearest map | v2 pvalue | v2 joint | LDA | QDA | GNB | GMM3 | kNN5 | SVM-RBF | RF |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| iris | .934 | .944 | .947 | .952 | **.978** | **.978** | .952 | .959 | .948 | .957 | .948 |
+| wine | .895 | .947 | .928 | .969 | .981 | **.992** | .973 | .837 | .956 | .983 | .983 |
+| breast cancer | .861 | .952 | .874 | .953 | .957 | .962 | .933 | .953 | .965 | **.973** | .957 |
+| digits | .751 | .951 | .904 | .950 | .951 | .967 | .789 | .850 | .971 | **.979** | .974 |
+| multimodal | .794 | .855 | .838 | .854 | .627 | .896 | .725 | .958 | .919 | .934 | **.976** |
+| rings | .512 | .609 | .557 | .756 | .354 | .751 | .804 | .769 | .673 | .910 | **.939** |
+| moons | .803 | .843 | .843 | .843 | .857 | .852 | .855 | .881 | .880 | .865 | **.907** |
+| xor | .875 | .909 | .901 | .904 | .506 | **.959** | .508 | .945 | .935 | .935 | .931 |
+| heavy-tailed | .441 | .650 | .637 | .660 | .707 | .522 | .466 | .670 | .724 | **.738** | **.738** |
+
+Average rank over all 9 datasets, where 1 is best: SVM 2.56, RF 2.72, QDA 4.17, kNN 4.50, GMM3 5.00, **v2 joint 6.39**, LDA 6.39, nearest map 7.56, GNB 7.61, v2 pvalue 8.78, **v1 10.33**. The Friedman test gives χ²=50.0, p=2.6e-7.
+
+v2 joint against each method, using a paired Wilcoxon test over splits within each dataset (p<0.05). Each cell counts datasets:
+
+| | v1 | nearest map | v2 pvalue | LDA | QDA | GNB | GMM3 | kNN5 | SVM | RF |
+|---|---|---|---|---|---|---|---|---|---|---|
+| v2 joint significantly better | 9 | 3 | 6 | 3 | 1 | 5 | 2 | 2 | 0 | 0 |
+| v2 joint significantly worse | 0 | 0 | 0 | 4 | 6 | 1 | 3 | 6 | 8 | 7 |
+
+Mean fit time per split: v2 2.6 s (5-fold cross-fit, i.e. 6× SOM training), v1 0.45 s, RF 1.2 s, the rest < 0.11 s.
+
+### Training-set contamination (gross errors, clean test set)
+
+A fraction ε of the training objects get `x += N(0, (5·std)²)` with labels kept. For all methods the features go through a RobustScaler fitted on the contaminated training set, so the experiment measures the classifiers rather than the scaler breaking down. There are 30 splits per (dataset, ε).
+
+![contamination](results/benchmark/contamination.png)
+
+Mean accuracy change vs. clean data, averaged over iris, wine, breast cancer, multimodal and rings:
+
+| ε | v1 | nearest map | v2 pvalue | v2 joint | LDA | QDA | GNB | GMM3 | kNN5 | SVM-RBF | RF |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0.05 | −.027 | −.012 | −.017 | −.016 | −.025 | −.147 | −.113 | −.039 | −.001 | −.041 | −.001 |
+| 0.10 | −.062 | −.031 | −.039 | −.034 | −.044 | −.201 | −.181 | −.098 | −.003 | −.082 | −.002 |
+| 0.20 | −.092 | −.049 | −.054 | −.057 | −.062 | −.294 | −.281 | −.176 | −.008 | −.138 | −.004 |
+| 0.30 | −.103 | −.074 | −.086 | −.098 | −.070 | −.309 | −.306 | −.222 | −.011 | −.164 | −.008 |
+
+Full per-dataset tables: `python scripts/benchmark.py report`.
+
+### Ablation: map size and neighbourhood width (v2, 20 splits)
+
+My hypothesis was that neighbourhood smoothing (σ) pulls prototypes between modes. **It was rejected:** σ=0.3 vs 1.0 changes accuracy by ≤ 0.02. A larger map helps modestly. Going from 3×3 to 4×4 gives (joint scoring) multimodal .859→.888, rings .754→.787, digits .951→.961 and wine .972→.978. That does not close the gap to GMM3 or kNN on multimodal.
+
+### What the benchmark says, honestly
+
+1. **v2 fixes v1.** It is significantly better on 9/9 datasets, and its outputs are always defined. On digits v1 collapses to .75, because in 64-D most test points fall outside every histogram.
+2. **Accuracy is not the method's selling point.** v2 joint is mid-pack, tied with LDA on average rank. SVM and RF beat it on almost every dataset, and kNN/QDA on most. On near-Gaussian real data LDA/QDA win. On nonlinear data v2 beats LDA by a wide margin (multimodal, rings, XOR), but flexible methods beat v2.
+3. **The 2023 "robust to outliers" claim is half true.** The SOM methods degrade about as much as LDA. They are far more robust than density-based QDA/GNB/GMM and than SVM, but far *less* robust than kNN and RF, which barely move.
+4. **Where the method genuinely adds value** is calibrated per-class typicality: the conformal coverage guarantee, prediction sets, and the reject option for unseen classes (see v2 section). Those are things SVM/RF/kNN don't offer out of the box. A follow-up paper should be framed around this, not around accuracy.
+
 ## Layout
 
 ```
@@ -125,6 +192,10 @@ kohonen_da/v2.py             KohonenDA2 (conformal, cross-fitted, reject option)
 kohonen_da/som.py            shared SOM training / BMU distances
 scripts/reproduce_paper.py   Section 4 reproduction + repeated-split study
 scripts/evaluate_v2.py       v2 vs v1 vs baselines: accuracy, coverage, open set
+scripts/benchmark.py         9-dataset benchmark + contamination experiment
+scripts/plot_benchmark.py    contamination figure
+kohonen_da/datasets.py       real + synthetic benchmark datasets
+kohonen_da/baselines.py      per-class GMM classifier
 tests/                       unit tests
 results/                     figures and per-split CSVs
 ```
