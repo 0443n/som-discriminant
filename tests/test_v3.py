@@ -134,3 +134,31 @@ def test_auto_selection(iris):
     P = m.predict_proba(X)
     assert np.allclose(P.sum(1), 1) and (m.predict(X) == y).mean() > 0.9
     assert m.novelty_pvalues(X).shape == (len(X),)
+
+
+def test_fast_selection_matches_full_when_all_sizes_stacked(iris):
+    from kohonen_da.v3 import KohonenDA3Auto
+    X, y = iris
+    full = KohonenDA3Auto(map_sizes=(2, 3), random_state=0).fit(X, y)
+    fast = KohonenDA3Auto(map_sizes=(2, 3), selection="fast", n_stack_sizes=2,
+                          random_state=0).fit(X, y)
+    assert (full.map_size_, full.scoring_) == (fast.map_size_, fast.scoring_)
+    assert full.selection_ == fast.selection_
+    fast1 = KohonenDA3Auto(map_sizes=(2, 3), selection="fast", random_state=0).fit(X, y)
+    assert len(fast1.selection_) == 2 + 2  # density at both sizes + 2 stacked at one
+
+
+def test_sorted_top_truncates_features(iris):
+    X, y = iris
+    m = KohonenDA3(map_size=3, scoring="joint_sorted", sorted_top=2, random_state=0).fit(X, y)
+    F = m._stack_features("joint_sorted", S=m.oof_sorted_)
+    assert F.shape[1] == 3 * 2
+    assert np.allclose(m.predict_proba(X).sum(1), 1)
+
+
+def test_sorted_top_auto_rule(iris):
+    X, y = iris
+    small = KohonenDA3(map_size=3, sorted_top="auto", random_state=0).fit(X, y)  # 3*9 <= 100
+    assert small._stack_features("joint_sorted", S=small.oof_sorted_).shape[1] == 27
+    big = KohonenDA3(map_size=6, sorted_top="auto", random_state=0).fit(X, y)    # 3*36 > 100
+    assert big._stack_features("joint_sorted", S=big.oof_sorted_).shape[1] == 3 * 5

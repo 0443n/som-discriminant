@@ -103,7 +103,7 @@ def run_one(dataset, unknown, seed):
     s["v3_classwise_diag"] = -v3.pvalues(Xall).max(1)
     v3.set_params(covariance="spherical")
     s["v3_pooled_sph"] = -v3.novelty_pvalues(Xall)
-    pna = KohonenDA3Auto(random_state=seed).fit(Xtr, ytr).novelty_pvalues(Xall)
+    pna = KohonenDA3Auto(sorted_top=None, random_state=seed).fit(Xtr, ytr).novelty_pvalues(Xall)
     s["v3_auto_pooled"] = -pna
     s["nearest_map"] = v2.bmu_distances(Xall).min(1)
     s["knn_dist"] = NearestNeighbors(n_neighbors=5).fit(Xtr).kneighbors(Xall)[0].mean(1)

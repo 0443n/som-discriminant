@@ -6,7 +6,8 @@ held-out check of the design decisions.
 clean   : 5 stratified 68/32 splits per dataset, StandardScaler on the training part.
           SOM methods: v1 and v2 (3x3, as in the paper), v3 density with 3x3 maps and
           the recommended KohonenDA3Auto(trim="auto") with map sizes {3,5,8,12}
-          (larger maps matter once classes have thousands of objects).
+          (larger maps matter once classes have thousands of objects); joint_sorted
+          uses the 5 nearest neurons per map (sorted_top="auto"), see README.
 openset : 5 splits per dataset; in each, a random 30% of the classes (at least one) is
           unseen: train on the rest, score held-out known objects + all unseen ones.
 

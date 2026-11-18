@@ -38,6 +38,7 @@ from .som import _chunks, auto_keep, bmu_distances, sq_dists, train_class_soms, 
 
 _EPS = 1e-12
 COVARIANCES = ("spherical", "diag")
+AUTO_TOP, AUTO_TOP_MAX_FEATURES = 5, 100
 
 
 def _sq_dists(X, W):
@@ -126,13 +127,18 @@ class KohonenDA3(ClassifierMixin, BaseEstimator):
         Pseudo-object count pulling neuron variances towards the class-pooled variance.
     reg_var : float
         Added to every variance (features are assumed standardised).
+    sorted_top : int, "auto" or None
+        "joint_sorted" uses only the `sorted_top` nearest neurons of every map
+        (None = all K*J sorted distances; with large maps that stacker dominates the
+        fit time and overfits). "auto": all if K*J <= 100, else the 5 nearest.
     reject_alpha, reject_label : reject objects whose pooled novelty p-value < alpha.
     """
 
     def __init__(self, map_size=3, sigma=1.0, learning_rate=0.5,
                  neighborhood_function="gaussian", n_iterations=1000, trim=0.0,
                  scoring="density", covariance="diag", shrinkage=5.0, reg_var=1e-2,
-                 cv=5, C=1.0, reject_alpha=None, reject_label=-1, random_state=None):
+                 cv=5, C=1.0, sorted_top=None, reject_alpha=None, reject_label=-1,
+                 random_state=None):
         self.map_size = map_size
         self.sigma = sigma
         self.learning_rate = learning_rate
@@ -145,6 +151,7 @@ class KohonenDA3(ClassifierMixin, BaseEstimator):
         self.reg_var = reg_var
         self.cv = cv
         self.C = C
+        self.sorted_top = sorted_top
         self.reject_alpha = reject_alpha
         self.reject_label = reject_label
         self.random_state = random_state
@@ -206,20 +213,28 @@ class KohonenDA3(ClassifierMixin, BaseEstimator):
         if name.startswith("joint_density"):
             return _relative(L)
         if name == "joint_sorted":
-            return S
+            m = self.sorted_top
+            if m == "auto":
+                # all neurons while the stacker is small; else the 5 nearest per map
+                # (the full stacker is slow and overfits on large maps)
+                m = None if len(self.classes_) * J <= AUTO_TOP_MAX_FEATURES else AUTO_TOP
+            if m is None or m >= J:
+                return S
+            return S.reshape(len(S), -1, J)[:, :, :m].reshape(len(S), -1)
         if name == "joint_min":  # v2-style: log distance to the nearest neuron per map
             return S[:, ::J]
         raise ValueError(name)
 
     def _stacker(self, name):
         """Logistic regression for a stacked scoring, fitted on out-of-fold features."""
-        if name not in self.stackers_:
+        key = (name, self.sorted_top) if name == "joint_sorted" else name
+        if key not in self.stackers_:
             if name.startswith("joint_density"):
                 F = _relative(self.oof_log_density_[name.split(":")[1]])
             else:
                 F = self._stack_features(name, S=self.oof_sorted_)
-            self.stackers_[name] = self._lr().fit(F, self.y_idx_)
-        return self.stackers_[name]
+            self.stackers_[key] = self._lr().fit(F, self.y_idx_)
+        return self.stackers_[key]
 
     def oof_accuracy(self, scoring, covariance=None) -> float:
         """Out-of-fold accuracy of a scoring on the training data (for model selection).
@@ -234,8 +249,8 @@ class KohonenDA3(ClassifierMixin, BaseEstimator):
         if scoring == "density":
             pred = (L + self.log_prior_).argmax(1)
         else:
-            F = {"joint_density": _relative(L), "joint_sorted": self.oof_sorted_,
-                 "joint_min": self.oof_sorted_[:, ::self.map_size ** 2]}[scoring]
+            F = (_relative(L) if scoring == "joint_density"
+                 else self._stack_features(scoring, S=self.oof_sorted_))
             n_splits = int(min(5, np.bincount(y).min()))
             pred = cross_val_predict(self._lr(), F, y, cv=n_splits)
         return float((pred == y).mean())
@@ -297,14 +312,20 @@ class KohonenDA3Auto(ClassifierMixin, BaseEstimator):
     """KohonenDA3 with map size and scoring chosen by out-of-fold accuracy.
 
     For every size in `map_sizes` a KohonenDA3 is fitted (its cross-fitting already
-    yields out-of-fold scores); every scoring in `scorings` is evaluated by
-    `KohonenDA3.oof_accuracy`, and the best (size, scoring) is kept. Ties go to the
-    smaller map, then to the earlier scoring in `scorings`. No test data is used.
+    yields out-of-fold scores) and scorings are evaluated by `KohonenDA3.oof_accuracy`;
+    the best (size, scoring) is kept. Ties go to the smaller map, then to the earlier
+    scoring in `scorings`. No test data is used.
+
+    selection : {"full", "fast"}
+        "full": every scoring at every size (the stacked scorings need a nested CV each).
+        "fast": "density" (free: already out-of-fold) at every size; the other scorings
+        only at the `n_stack_sizes` sizes with the best density accuracy.
     Remaining parameters are passed to KohonenDA3.
     """
 
     def __init__(self, map_sizes=(3, 4, 5), scorings=("density", "joint_density", "joint_sorted"),
                  covariance="diag", trim=0.0, shrinkage=5.0, reg_var=1e-2, cv=5, C=1.0,
+                 sorted_top="auto", selection="full", n_stack_sizes=1,
                  sigma=1.0, learning_rate=0.5, neighborhood_function="gaussian",
                  n_iterations=1000, reject_alpha=None, reject_label=-1, random_state=None):
         self.map_sizes = map_sizes
@@ -315,6 +336,9 @@ class KohonenDA3Auto(ClassifierMixin, BaseEstimator):
         self.reg_var = reg_var
         self.cv = cv
         self.C = C
+        self.sorted_top = sorted_top
+        self.selection = selection
+        self.n_stack_sizes = n_stack_sizes
         self.sigma = sigma
         self.learning_rate = learning_rate
         self.neighborhood_function = neighborhood_function
@@ -323,23 +347,47 @@ class KohonenDA3Auto(ClassifierMixin, BaseEstimator):
         self.reject_label = reject_label
         self.random_state = random_state
 
+    def _model(self, size):
+        return KohonenDA3(
+            map_size=size, covariance=self.covariance, trim=self.trim,
+            shrinkage=self.shrinkage, reg_var=self.reg_var, cv=self.cv, C=self.C,
+            sorted_top=self.sorted_top, sigma=self.sigma, learning_rate=self.learning_rate,
+            neighborhood_function=self.neighborhood_function,
+            n_iterations=self.n_iterations, reject_alpha=self.reject_alpha,
+            reject_label=self.reject_label, random_state=self.random_state)
+
     def fit(self, X, y):
         X, y = check_X_y(X, y)
+        if self.selection not in ("full", "fast"):
+            raise ValueError(f"unknown selection={self.selection!r}")
         best, best_key, self.selection_ = None, None, {}
-        for i, size in enumerate(self.map_sizes):
-            m = KohonenDA3(
-                map_size=size, covariance=self.covariance, trim=self.trim,
-                shrinkage=self.shrinkage, reg_var=self.reg_var, cv=self.cv, C=self.C,
-                sigma=self.sigma, learning_rate=self.learning_rate,
-                neighborhood_function=self.neighborhood_function,
-                n_iterations=self.n_iterations, reject_alpha=self.reject_alpha,
-                reject_label=self.reject_label, random_state=self.random_state).fit(X, y)
-            for j, scoring in enumerate(self.scorings):
-                acc = m.oof_accuracy(scoring)
-                self.selection_[(size, scoring)] = acc
-                key = (acc, -i, -j)
-                if best_key is None or key > best_key:
-                    best_key, best = key, (m, scoring)
+
+        def consider(i, m, j, scoring):
+            nonlocal best, best_key
+            acc = m.oof_accuracy(scoring)
+            self.selection_[(m.map_size, scoring)] = acc
+            key = (acc, -i, -j)
+            if best_key is None or key > best_key:
+                best_key, best = key, (m, scoring)
+
+        cheap = [j for j, sc in enumerate(self.scorings) if sc == "density"]
+        stacked = [j for j, sc in enumerate(self.scorings) if sc != "density"]
+        if self.selection == "full":
+            for i, size in enumerate(self.map_sizes):
+                m = self._model(size).fit(X, y)
+                for j, scoring in enumerate(self.scorings):
+                    consider(i, m, j, scoring)
+        else:
+            models = [self._model(size).fit(X, y) for size in self.map_sizes]
+            dens = [models[i].oof_accuracy("density") for i in range(len(models))]
+            for i, m in enumerate(models):
+                for j in cheap:
+                    consider(i, m, j, "density")
+            order = sorted(range(len(models)), key=lambda i: (-dens[i], i))
+            for i in order[: max(1, self.n_stack_sizes)]:
+                for j in stacked:
+                    consider(i, models[i], j, self.scorings[j])
+            del models
         self.best_ = best[0].set_params(scoring=best[1])
         self.map_size_, self.scoring_ = self.best_.map_size, best[1]
         self.classes_ = self.best_.classes_

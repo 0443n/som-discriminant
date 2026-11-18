@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 import numpy as np
 from minisom import MiniSom
 
@@ -52,7 +54,24 @@ def check_trim(trim):
         raise ValueError("trim must be in [0, 1)")
 
 
+_AUTO_KEEP_CACHE: dict = {}
+_AUTO_KEEP_CACHE_MAX = 512
+
+
 def auto_keep(Xc):
+    """Memoised `_auto_keep`: the same class subset is trimmed many times (SOM fit and
+    both neuron-mixture types, in every fold, for every candidate map size)."""
+    Xc = np.ascontiguousarray(Xc)
+    key = (Xc.shape, hashlib.blake2b(Xc.view(np.uint8), digest_size=16).hexdigest())
+    if key not in _AUTO_KEEP_CACHE:
+        if len(_AUTO_KEEP_CACHE) >= _AUTO_KEEP_CACHE_MAX:
+            _AUTO_KEEP_CACHE.clear()
+        _AUTO_KEEP_CACHE[key] = _auto_keep(Xc)
+    keep = _AUTO_KEEP_CACHE[key]
+    return None if keep is None else keep.copy()
+
+
+def _auto_keep(Xc):
     """Indices of a class's objects that are not robust outliers ("auto" trimming).
 
     Outlier score: mean distance to the 5 nearest objects of the same class (computed
@@ -69,7 +88,9 @@ def auto_keep(Xc):
     for sl in _chunks(n, Xc.size):
         d = np.sqrt(((Xc[sl, None, :] - Xc[None, :, :]) ** 2).sum(-1))
         d[np.arange(sl.stop - sl.start), np.arange(sl.start, sl.stop)] = np.inf
-        knn[sl] = np.sort(d, axis=1)[:, :k].mean(1)
+        # k smallest via partition, then sorted: same values in the same order as a
+        # full sort (bit-identical mean), O(n) instead of O(n log n) per row
+        knn[sl] = np.sort(np.partition(d, k - 1, axis=1)[:, :k], axis=1).mean(1)
     score = np.log(knn + 1e-12)
     med = np.median(score)
     mad = 1.4826 * np.median(np.abs(score - med))

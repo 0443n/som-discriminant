@@ -130,7 +130,7 @@ def run_split(dataset, seed, eps=0.0, scaler="standard"):
     add("v3_density_tauto", v3a.predict(Xte), time.perf_counter() - t0)
     for trim, name in [(0.0, "v3_auto"), ("auto", "v3_auto_trim")]:
         t0 = time.perf_counter()
-        au = KohonenDA3Auto(trim=trim, random_state=seed).fit(Xtr, ytr)
+        au = KohonenDA3Auto(trim=trim, sorted_top=None, random_state=seed).fit(Xtr, ytr)
         add(name, au.predict(Xte), time.perf_counter() - t0, f"{au.map_size_}x{au.map_size_}/{au.scoring_}")
 
     for name in BASELINES:

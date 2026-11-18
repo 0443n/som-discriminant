@@ -384,35 +384,57 @@ None of these 7 OpenML datasets were used while v2/v3 were developed:
   - Longer SOM training (10 epochs instead of 1000 iterations) added ≤ .007, so it was not used.
 
 ```bash
-.venv/bin/python -I scripts/benchmark_large.py clean     # ~90 min on 12 workers
-.venv/bin/python -I scripts/benchmark_large.py openset   # ~40 min
+.venv/bin/python -I scripts/benchmark_large.py clean     # ~10 min on 12 workers
+.venv/bin/python -I scripts/benchmark_large.py openset   # ~7 min
 ```
+
+### Speed fix
+
+The first run took about 2 hours, up to 58 min per split for letter. Profiling one 12×12 fit showed where the time went:
+
+| | letter 12×12 | covertype 12×12 |
+|---|---|---|
+| Whole v3 fit (SOMs, mixtures, calibration) | 33 s | 181 s (163 s of it adaptive trim) |
+| Nested-CV selection of the `joint_sorted` stacker | 463 s | 405 s |
+| Final `joint_sorted` stacker | 131 s | 109 s |
+
+Three fixes followed:
+1. **`sorted_top="auto"`** (the default in `KohonenDA3Auto`). The `joint_sorted` stacker uses the 5 nearest neurons per map instead of all K·J; it keeps all of them when K·J ≤ 100.
+   - On the datasets where `joint_sorted` is chosen, the stacker is 30–65× faster: covertype 575 s → 9 s, MNIST 288 s → 7 s.
+   - It is also *more* accurate. The full stacker overfits large maps: on covertype its out-of-fold accuracy is .713 but its test accuracy only .559, versus .679 with 5 neurons.
+   - Only rings, a small dataset, prefers all neurons, and the K·J ≤ 100 rule keeps them there.
+2. **Adaptive trim memoised.** The same class subset was trimmed once per fold, per mixture type and per map size. The kNN step also uses a partial sort now.
+3. **Lazy stackers.** Stacking models are fitted only when a scoring is actually used. Items 2 and 3 were verified bit-identical against the previous code.
+
+`KohonenDA3Auto(selection="fast")`, which runs the stacked scorings only at the map size with the best `density` accuracy, is also available. With the cheap stacker it saves little, so the default stays `"full"`. The small-data scripts pin `sorted_top=None`, so the committed small-data results stay reproducible. The results of the slow first run are kept in `results/benchmark_large/slow_selection/`.
+
+Effect: the benchmark takes ~10 min instead of ~90 (closed set) and 7 instead of 42 (open set). Fit time per split dropped from 58/57/34 min to 4.7/5.3/4.7 min for letter/covertype/MNIST.
 
 ### Closed set: mean accuracy
 
-| dataset | v1 | v2 joint | v3 density 3×3 | **v3 auto + trim** | LDA | QDA | GNB | GMM3 | kNN5 | SVM | RF |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| segment | .717 | .905 | .906 | .940 | .914 | .879 | .789 | .915 | .937 | .936 | **.973** |
-| satimage | .752 | .872 | .865 | .891 | .838 | .856 | .798 | .870 | .905 | .895 | **.915** |
-| optdigits | .460 | .948 | .959 | .973 | .952 | .971 | .670 | .960 | .976 | **.982** | **.982** |
-| pendigits | .929 | .969 | .976 | .991 | .873 | .984 | .855 | .991 | .992 | **.994** | .990 |
-| covertype | .264 | .613 | .441 | .468 | .676 | .298 | .092 | .493 | .772 | .739 | **.830** |
-| MNIST (PCA-50) | .546 | .858 | .895 | .948 | .861 | .960 | .870 | .959 | .943 | **.970** | .935 |
-| letter | .593 | .786 | .853 | .948 | .699 | .879 | .640 | .948 | .935 | .938 | **.960** |
+| dataset | v1 | v2 joint | v3 density 3×3 | v3 auto + trim (slow, first run) | **v3 auto + trim** | LDA | QDA | GNB | GMM3 | kNN5 | SVM | RF |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| segment | .717 | .905 | .906 | .940 | .948 | .914 | .879 | .789 | .915 | .937 | .936 | **.973** |
+| satimage | .752 | .872 | .865 | .891 | .903 | .838 | .856 | .798 | .870 | .905 | .895 | **.915** |
+| optdigits | .460 | .948 | .959 | .973 | .978 | .952 | .971 | .670 | .960 | .976 | **.982** | **.982** |
+| pendigits | .929 | .969 | .976 | .991 | .991 | .873 | .984 | .855 | .991 | .992 | **.994** | .990 |
+| covertype | .264 | .613 | .441 | .468 | .676 | .676 | .298 | .092 | .493 | .772 | .739 | **.830** |
+| MNIST (PCA-50) | .546 | .858 | .895 | .948 | .949 | .861 | .960 | .870 | .959 | .943 | **.970** | .935 |
+| letter | .593 | .786 | .853 | .948 | .948 | .699 | .879 | .640 | .948 | .935 | .938 | **.960** |
+| **mean** | .609 | .850 | .842 | .880 | **.913** | .831 | .832 | .673 | .877 | .923 | .922 | .941 |
 
-Average rank: RF 2.36, SVM 2.50, kNN 3.14, **v3 auto + trim 3.79**, GMM3 4.64, QDA 6.43, v3 density 3×3 7.14, v2 joint 7.57, LDA 7.86, GNB 10.00, v1 10.57.
+Average rank: RF 2.36, SVM 2.64, **v3 auto + trim 3.07**, kNN 3.29, GMM3 4.79, QDA 6.43, v3 density 3×3 7.14, v2 joint 7.71, LDA 8.00, GNB 10.00, v1 10.57.
 
 Paired t-tests over the 5 splits (p<0.05), counting datasets:
-- v3 auto + trim vs kNN: better on 1, worse on 1, tied on 5.
-- vs SVM: better 1, worse 4.
+- v3 auto + trim vs kNN: better on 3, worse on 1, tied on 3.
+- vs SVM: better 2, worse 4.
 - vs RF: better 1, worse 5.
-- It is better than v1, v2 and v3 3×3 on 6/7.
+- vs GMM3: better 4, worse 1.
+- It is better than v1, v2 and v3 3×3 on 7/7.
 
-**Without covertype**, the mean accuracy is v3 auto .949, kNN .948, SVM .953, RF .959.
+Map sizes chosen: mostly 12×12 (the largest candidate). Scoring: `density` on pendigits, letter and partly segment; `joint_sorted` elsewhere.
 
-Map sizes chosen: mostly 12×12 (the largest candidate). Scoring: `density` on pendigits and letter, `joint_sorted` elsewhere.
-
-**Fit time per split is the practical weak point.** For example, letter takes 58 min and covertype 57 min, against seconds for SVM/RF. Most of it is the nested cross-validation of the `joint_sorted` stacker on large maps; v3 at a fixed 3×3 takes 3–31 s.
+Fit time per split: 23–70 s on the small four, 280–320 s on letter, covertype and MNIST. That is still far slower than RF/SVM (seconds). What remains is fitting SOMs and mixtures for 4 map sizes × 6 cross-fits.
 
 ### Open set: a random 30% of the classes are unseen
 
@@ -422,25 +444,25 @@ AUROC:
 |---|---|---|---|---|---|---|---|
 | segment | **.935** | .905 | .922 | .927 | .884 | .762 | .904 |
 | satimage | **.888** | .852 | .873 | .812 | .695 | .780 | .822 |
-| optdigits | .954 | .907 | .942 | .954 | .879 | .955 | **.968** |
+| optdigits | .955 | .907 | .942 | .954 | .879 | .955 | **.968** |
 | pendigits | **.991** | .964 | .988 | .987 | .917 | .978 | .970 |
-| covertype | .638 | .572 | **.737** | .587 | .716 | .411 | .502 |
+| covertype | .643 | .572 | **.737** | .587 | .716 | .411 | .502 |
 | MNIST (PCA-50) | .861 | .724 | .818 | .922 | .837 | **.939** | .914 |
 | letter | .949 | .819 | .918 | **.955** | .720 | .863 | .917 |
 
-Average AUROC rank: **v3 auto 2.14 (1st of 7)**, GMM 3.00, kNN 3.14, RF 4.00, SVM 4.57, v2 pooled 5.29, Mahalanobis 5.86.
+Average AUROC rank: **v3 auto 2.14 (1st of 7)**, GMM 3.00, kNN 3.14, RF 4.00, SVM 4.57, v2 pooled 5.29, Mahalanobis 5.86. These figures are unchanged by the speed fix.
 
-With α=0.05 fixed in advance, the false-reject rate is 3.7–4.6% on every dataset. Detection rates: pendigits .97, letter .70, optdigits .69, satimage .58, segment .43, MNIST .38, covertype .14.
+With α=0.05 fixed in advance, the false-reject rate is 3.6–4.5% on every dataset. Detection rates: pendigits .97, letter .70, optdigits .67, satimage .58, segment .43, MNIST .38, covertype .14.
 
 ### What the held-out check says
 
 1. **The design generalises to unseen, larger data.**
-   - Closed set: v3 auto is 4th of 11, statistically level with kNN on 5/7 datasets.
+   - Closed set: v3 auto is 3rd of 11, behind RF and SVM and ahead of kNN.
    - Open set: it is the best unseen-class detector again (1st of 7).
    - The conformal false-reject guarantee holds everywhere.
 2. **Map size must scale with the data.** Automatic selection handles this. The largest candidate (12×12) was usually chosen, so even larger maps might help a little.
-3. **A clear limitation is mixed or binary features.** On covertype, a Gaussian neuron model on 0/1 indicator columns breaks down, as it does for every density method (GNB .09, QDA .30, GMM3 .49). The method is meant for continuous features.
-4. **Cost.** Automatic selection with large maps is slow. Selecting the map size with `density` only, or on a subsample, is the obvious next optimisation.
+3. **A clear limitation is mixed or binary features.** On covertype (.676 vs RF .830), a Gaussian neuron model on 0/1 indicator columns breaks down, as it does for every density method (GNB .09, QDA .30, GMM3 .49). The method is meant for continuous features.
+4. **Cost.** After the speed fix it is ~5 min per split on 20k objects. That is usable, but still 1–2 orders of magnitude slower than RF/SVM.
 
 ## Layout
 
