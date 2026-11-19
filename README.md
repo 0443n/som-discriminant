@@ -1,11 +1,17 @@
-# kohonen-da
+# som-discriminant
 
-Reproduction (and, later, extensions) of
+Discriminant analysis with Kohonen self-organising maps: a reproduction of
 
 > Komarov I.V., Kuravsky L.S. **Discriminant Analysis Based on Kohonen Statistics.**
 > *Modelling and Data Analysis*, 2023, 13(4), 176–182. doi:[10.17759/mda.2023130411](https://doi.org/10.17759/mda.2023130411)
 
+and its extensions:
+- **v2** (`KohonenDA2`): conformal p-values with cross-fitting, robust trimming, and novelty rejection with a false-reject rate set in advance.
+- **v3** (`KohonenDA3`, `KohonenDA3Auto`): neuron-level Gaussian mixtures, stacking, and automatic selection of map size, scoring and trimming.
+
 The original 2023 code is lost; `kohonen_da/` is a clean-room reimplementation from the paper text.
+
+**Development note.** The 2023 approach was reproduced and extended by the first author together with [Claude](https://claude.com/claude-code) (Anthropic), an AI assistant. Claude helped write the code, run the experiments and analyse the benchmarks. The research direction and all decisions are the author's.
 
 ## Setup
 
